@@ -1,0 +1,12 @@
+ChemRD Intelligence — complete repository
+
+To run the packaged Windows app:
+
+1. Copy `.env.example` and rename the copy to `.env`.
+2. Add your own provider API keys if you want live AI/research retrieval.
+3. Double-click `release\ChemRD-Intelligence.exe`.
+
+To develop in VS Code, follow `README.md` and use the Python project files in the repository root.
+
+The real `.env` file is intentionally not included. Never share it or commit it to GitHub.
+The packaged app stores its local database under %LOCALAPPDATA%\ChemRD.
