@@ -27,8 +27,14 @@ for _dotenv_path in _dotenv_paths:
 from .connectors.registry import CONNECTORS, list_connectors
 from .live_research import live_research
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
 from .llm import relevant_evidence, synthesize
 from .models import AssistantRequest, IngestPreviewRequest, LibraryFolderCreate, LibraryItemCreate, SaveLiveChemicalRequest
+=======
+from .llm import synthesize
+from .models import AssistantRequest, IngestPreviewRequest, LibraryFolderCreate, LibraryItemCreate, SaveLiveChemicalRequest, ExperimentCreate, SimulationRequest
+from .simulation import simulate_experiment
+>>>>>>> Stashed changes
 =======
 from .llm import synthesize
 from .models import AssistantRequest, IngestPreviewRequest, LibraryFolderCreate, LibraryItemCreate, SaveLiveChemicalRequest, ExperimentCreate, SimulationRequest
