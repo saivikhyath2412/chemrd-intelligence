@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -17,6 +18,15 @@ from urllib.request import Request, urlopen
 
 
 DEFAULT_PROVIDER_ORDER = ("openai", "gemini", "groq")
+
+_QUESTION_STOPWORDS = {
+    "a", "an", "and", "are", "be", "can", "could", "does", "do", "for", "from",
+    "give", "how", "i", "if", "in", "information", "is", "it", "me", "of", "on",
+    "or", "please", "should", "tell", "that", "the", "this", "to", "what", "when",
+    "where", "which", "who", "why", "with", "would", "you", "your", "about", "explain",
+    "describe", "known", "everything", "compare", "find", "show", "used", "use", "using",
+    "chemical", "chemicals", "compound", "compounds", "question", "answer",
+}
 
 
 def _value(name: str, default: str = "") -> str:
@@ -31,6 +41,64 @@ def _provider_order() -> list[str]:
     raw = _value("LLM_PROVIDER_ORDER", ",".join(DEFAULT_PROVIDER_ORDER))
     requested = [item.strip().lower() for item in raw.split(",") if item.strip()]
     return [item for item in requested if item in {"openai", "gemini", "groq"}] or list(DEFAULT_PROVIDER_ORDER)
+
+
+def _tokens(value: str) -> set[str]:
+    return {
+        token
+        for token in re.findall(r"[a-z0-9][a-z0-9+.-]*", (value or "").casefold())
+        if len(token) >= 2 and token not in _QUESTION_STOPWORDS
+    }
+
+
+def _record_text(item: dict[str, Any]) -> str:
+    source = item.get("source", {}) or {}
+    values = [
+        item.get("name"), item.get("subtitle"), item.get("abstract"), item.get("iupac_name"),
+        source.get("title"), source.get("publisher"), " ".join(item.get("synonyms", [])[:8]),
+    ]
+    return " ".join(str(value) for value in values if value)
+
+
+def _relevance_score(question: str, item: dict[str, Any]) -> int:
+    question_tokens = _tokens(question)
+    record_tokens = _tokens(_record_text(item))
+    overlap = question_tokens & record_tokens
+    score = len(overlap)
+    # A named chemical match is strong evidence even when the question is
+    # short, e.g. "What is paclitaxel?".
+    if item.get("type") == "live_chemical" and question_tokens:
+        name_tokens = _tokens(str(item.get("name") or ""))
+        if name_tokens and name_tokens <= question_tokens | record_tokens and name_tokens & question_tokens:
+            score += 5
+    return score
+
+
+def relevant_evidence(question: str, evidence: dict[str, Any]) -> dict[str, Any]:
+    """Remove unrelated retrieval hits before they reach the model or UI.
+
+    Public search providers often return plausible-looking but unrelated titles
+    for broad questions. Those records must not become fake citations or force
+    the assistant to refuse a perfectly answerable general question.
+    """
+    results = evidence.get("results", []) or []
+    scored = [(index, _relevance_score(question, item), item) for index, item in enumerate(results)]
+    selected = [item for _, score, item in scored if score > 0]
+    selected.sort(key=lambda item: (0 if item.get("type") == "live_chemical" else 1))
+    selected_ids = {id(item) for item in selected}
+    citations = [
+        citation for citation in (evidence.get("citations", []) or [])
+        if any(
+            citation.get("url") == item.get("source_url")
+            or citation.get("id") == (item.get("source") or {}).get("id")
+            for item in selected
+        )
+    ]
+    filtered = dict(evidence)
+    filtered["results"] = selected[:24]
+    filtered["citations"] = citations[:8]
+    filtered["evidence_quality"] = "relevant" if selected else "none"
+    return filtered
 
 
 def _compact_records(evidence: dict[str, Any]) -> list[dict[str, Any]]:
@@ -91,11 +159,14 @@ def _prompt_parts(question: str, evidence: dict[str, Any]) -> tuple[str, str]:
     records = _compact_records(evidence)
     evidence_json = json.dumps(records, ensure_ascii=False, separators=(",", ":"))
     instructions = (
-        "You are the ChemR&D research assistant. Answer only from the retrieved evidence. "
+        "You are the ChemR&D research assistant and a general chemistry explainer. "
+        "Answer general scientific questions from your trained knowledge when the retrieved evidence is empty or unrelated. "
         "Always begin with a section titled 'Direct answer:' containing 2-4 concise sentences that directly answer the user's question. "
         "Then use a section titled 'Key facts:' for identifiers and molecular properties, when relevant, and a section titled 'Research findings:' for evidence from papers or patents. "
         "The direct answer must not be replaced by a bibliography or source list. "
-        "Use only sources that clearly relate to the named chemical or topic; ignore irrelevant search-result titles. "
+        "Use retrieved sources only when they clearly relate to the named chemical or topic; ignore irrelevant search-result titles. "
+        "If there are no relevant sources, answer normally and add a brief line saying 'General answer; no relevant source was retrieved for this response.' "
+        "Do not invent a citation for a general-knowledge statement. "
         "A title alone is not evidence for a scientific claim. If the retrieved evidence is weak or unrelated, say that plainly. "
         "Never invent missing values. Separate PubChem identity facts from paper findings and label uncertainty. "
         "Cite evidence inline as [S1], [S2], etc., matching source_number. "

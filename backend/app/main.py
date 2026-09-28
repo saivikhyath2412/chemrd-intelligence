@@ -26,7 +26,7 @@ for _dotenv_path in _dotenv_paths:
 
 from .connectors.registry import CONNECTORS, list_connectors
 from .live_research import live_research
-from .llm import synthesize
+from .llm import relevant_evidence, synthesize
 from .models import AssistantRequest, IngestPreviewRequest, LibraryFolderCreate, LibraryItemCreate, SaveLiveChemicalRequest
 from .store import Store
 
@@ -304,34 +304,43 @@ def ingest_preview(request: IngestPreviewRequest):
 def assistant(request: AssistantRequest):
     if request.live:
         live = live_research(request.question)
-        if live["results"]:
-            synthesis = synthesize(request.question, live)
-            if len(synthesis) == 3:
-                generated, llm_error, llm_provider = synthesis
-            else:  # compatibility with lightweight test doubles and older integrations
-                generated, llm_error = synthesis
-                llm_provider = None
-            if generated:
-                assistant_status = f"{llm_provider.title() if llm_provider else 'AI'} synthesis active"
-            elif llm_error and "RateLimitError" in llm_error:
-                assistant_status = "AI providers rate-limited; showing cited retrieval"
-            elif llm_error and "AuthenticationError" in llm_error:
-                assistant_status = "AI providers rejected their keys; showing cited retrieval"
-            elif llm_error:
-                assistant_status = "AI providers unavailable; showing cited retrieval"
-            else:
-                assistant_status = "Cited retrieval"
-            return {
-                "answer": generated or live["answer"],
-                "citations": live["citations"],
-                "results": live["results"],
-                "providers": live["providers"],
-                "retrieved_at": live["retrieved_at"],
-                "assistant_mode": "llm_synthesis" if generated else "retrieval_summary",
-                "assistant_provider": llm_provider,
-                "assistant_status": assistant_status,
-                "disclaimer": "Live retrieval uses documented public APIs. Verify the cited primary source and applicable license before relying on a claim.",
-            }
+        evidence = relevant_evidence(request.question, live)
+        synthesis = synthesize(request.question, evidence)
+        if len(synthesis) == 3:
+            generated, llm_error, llm_provider = synthesis
+        else:  # compatibility with lightweight test doubles and older integrations
+            generated, llm_error = synthesis
+            llm_provider = None
+        if not live.get("providers") and not live.get("results"):
+            assistant_status = "Needs a specific subject"
+            assistant_mode = "retrieval_summary"
+        elif generated:
+            assistant_status = f"{llm_provider.title() if llm_provider else 'AI'} synthesis active"
+            assistant_mode = "llm_synthesis"
+        elif llm_error and "RateLimitError" in llm_error:
+            assistant_status = "AI providers rate-limited; showing relevant retrieval"
+            assistant_mode = "retrieval_summary"
+        elif llm_error and "AuthenticationError" in llm_error:
+            assistant_status = "AI providers rejected their keys; showing relevant retrieval"
+            assistant_mode = "retrieval_summary"
+        elif llm_error:
+            assistant_status = "AI providers unavailable; showing relevant retrieval"
+            assistant_mode = "retrieval_summary"
+        else:
+            assistant_status = "Relevant cited retrieval"
+            assistant_mode = "retrieval_summary"
+        return {
+            "answer": generated or evidence["answer"],
+            "citations": evidence.get("citations", []),
+            "results": evidence.get("results", []),
+            "providers": live.get("providers", {}),
+            "retrieved_at": live.get("retrieved_at"),
+            "assistant_mode": assistant_mode,
+            "assistant_provider": llm_provider,
+            "assistant_status": assistant_status,
+            "evidence_quality": evidence.get("evidence_quality", "none"),
+            "disclaimer": "General answers come from the configured AI provider when no relevant source was retrieved. Verify scientific, safety, regulatory, and process claims against primary sources before relying on them.",
+        }
         # Do not replace a clear live-retrieval response with unrelated seeded
         # demo content when the query is ambiguous or has no live match.
         return {

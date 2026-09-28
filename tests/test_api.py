@@ -183,6 +183,40 @@ def test_live_assistant_does_not_replace_ambiguous_query_with_seeded_demo(monkey
     assert body["assistant_status"] == "Needs a specific subject"
 
 
+def test_live_assistant_answers_general_questions_without_unrelated_citations(monkeypatch):
+    import backend.app.main as main_module
+
+    monkeypatch.setattr(main_module, "live_research", lambda query: {
+        "query": query,
+        "results": [{
+            "type": "live_paper",
+            "name": "Neural Organization of Episodic Memory and Navigation",
+            "abstract": "A study of memory and navigation in adults.",
+            "source_url": "https://example.test/unrelated",
+            "source": {"id": "unrelated", "title": "Unrelated paper", "license": "public"},
+        }],
+        "citations": [{"id": "unrelated", "label": "Unrelated paper", "url": "https://example.test/unrelated", "reason": "paper"}],
+        "answer": "retrieval fallback",
+        "providers": {"OpenAlex": {"status": "ok", "records": 1}},
+        "retrieved_at": "2026-09-28T00:00:00+00:00",
+    })
+
+    def fake_synthesize(question, evidence):
+        assert evidence["results"] == []
+        assert evidence["citations"] == []
+        return "Direct answer:\nAcid-base conditions can change chemical stability by changing protonation and reaction rates.", None, "groq"
+
+    monkeypatch.setattr(main_module, "synthesize", fake_synthesize)
+    response = client.post("/api/assistant", json={"question": "How does pH affect chemical stability?", "live": True})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["assistant_mode"] == "llm_synthesis"
+    assert body["assistant_provider"] == "groq"
+    assert body["citations"] == []
+    assert body["results"] == []
+    assert "protonation" in body["answer"]
+
+
 def test_library_folders_accept_chemicals_and_research_items():
     folders = client.get("/api/library/folders").json()
     assert folders
