@@ -25,6 +25,7 @@ for _dotenv_path in _dotenv_paths:
     load_dotenv(_dotenv_path, override=False)
 
 from .connectors.registry import CONNECTORS, list_connectors
+from .chemistry import structure_svg
 from .live_research import live_research
 from .llm import relevant_evidence, synthesize
 from .models import AssistantRequest, IngestPreviewRequest, LibraryFolderCreate, LibraryItemCreate, SaveLiveChemicalRequest
@@ -76,17 +77,11 @@ def chemical(chemical_id: str):
     return item
 
 
-def _pubchem_asset(chemical_id: str, asset: str) -> Response:
+def _chemical_structure_asset(chemical_id: str, asset: str) -> Response:
     item = store.chemical(chemical_id)
-    cid = item.get("pubchem_cid") if item else None
-    if not cid:
-        raise HTTPException(404, "No public conformer is linked to this chemical")
-    return _pubchem_asset_by_cid(
-        str(cid),
-        asset,
-        fallback_smiles=item.get("smiles") if item else None,
-        fallback_name=item.get("name") if item else None,
-    )
+    if not item:
+        raise HTTPException(404, "Chemical not found")
+    return _structure_asset(asset, fallback_smiles=item.get("smiles"), fallback_name=item.get("name"))
 
 
 def _local_conformer_sdf(smiles: str | None) -> bytes | None:
@@ -114,47 +109,32 @@ def _local_conformer_sdf(smiles: str | None) -> bytes | None:
         return None
 
 
-def _pubchem_asset_by_cid(
-    cid: str,
+def _structure_asset(
     asset: str,
     fallback_smiles: str | None = None,
     fallback_name: str | None = None,
 ) -> Response:
+    identifier = fallback_smiles or fallback_name
+    if not identifier:
+        raise HTTPException(404, "No SMILES or chemical name is available for this structure")
+    encoded_identifier = quote(identifier, safe="")
     if asset == "2d":
         candidates = [
-            (f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/{cid}/PNG?image_size=large", "image/png", "PubChem 2-D depiction"),
-            (f"https://cactus.nci.nih.gov/chemical/structure/{quote(fallback_name or cid, safe='')}/image", "image/png", "NCI Cactus 2-D depiction"),
+            (f"https://cactus.nci.nih.gov/chemical/structure/{encoded_identifier}/image", "image/png", "NCI/CADD Cactus 2-D depiction"),
         ]
     else:
-        candidates = []
-        # PubChem intentionally has no generated 3-D conformer for some large
-        # molecules. Paclitaxel is one of those records. NIH 3D publishes a
-        # public-domain, workflow-generated MOL file for it, so use that as a
-        # source-backed fallback before trying general structure services.
-        normalized_name = (fallback_name or "").strip().casefold()
-        if str(cid) == "36314" or normalized_name in {"paclitaxel", "taxol"}:
-            candidates.append(
-                (
-                    "https://3d.nih.gov/api/files/94543",
-                    "chemical/x-mdl-sdfile",
-                    "NIH 3D 3DPX-003114 (public-domain workflow-generated conformer)",
-                )
-            )
-        candidates.extend(
-            [
-                (f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/{cid}/SDF?record_type=3d", "chemical/x-mdl-sdfile", "PubChem 3-D conformer"),
-                (f"https://cactus.nci.nih.gov/chemical/structure/{quote(fallback_name or cid, safe='')}/file?format=sdf&get3d=true", "chemical/x-mdl-sdfile", "NCI Cactus generated conformer"),
-            ]
-        )
+        candidates = [
+            (f"https://cactus.nci.nih.gov/chemical/structure/{encoded_identifier}/file?format=sdf&get3d=true", "chemical/x-mdl-sdfile", "NCI/CADD Cactus generated 3-D conformer"),
+        ]
     last_error = None
     for candidate in candidates:
         url, media_type, source_label = candidate
         try:
-            request = Request(url, headers={"User-Agent": "ChemRD-Intelligence/0.1"})
+            request = Request(url, headers={"User-Agent": "ChemRD-Intelligence/0.2"})
             with urlopen(request, timeout=25) as response:
                 payload = response.read()
-            # NIH 3D's official molecule file is a MOL file without the SDF
-            # record terminator. Add it so every downstream SDF consumer,
+            # Some public structure services return a MOL file without the
+            # SDF record terminator. Add it so every downstream SDF consumer,
             # including 3Dmol.js, receives a complete single-record SDF.
             if media_type == "chemical/x-mdl-sdfile" and b"M  END" in payload and b"$$$$" not in payload:
                 payload += b"\n$$$$\n"
@@ -164,12 +144,27 @@ def _pubchem_asset_by_cid(
                 headers={
                     "Cache-Control": "public, max-age=86400",
                     "X-ChemRD-Structure-Source": source_label,
-                    "X-ChemRD-Structure-Origin": "model_predicted",
+                    "X-ChemRD-Structure-Origin": "model_predicted" if asset == "3d" else "provider_retrieved",
                 },
             )
         except (OSError, URLError) as exc:
             last_error = exc
-    if asset == "3d":
+    if asset == "2d":
+        try:
+            local_svg = structure_svg(fallback_smiles).encode("utf-8") if fallback_smiles else None
+        except Exception:
+            local_svg = None
+        if local_svg:
+            return Response(
+                content=local_svg,
+                media_type="image/svg+xml",
+                headers={
+                    "Cache-Control": "private, max-age=3600",
+                    "X-ChemRD-Structure-Source": "Local RDKit 2-D depiction",
+                    "X-ChemRD-Structure-Origin": "calculated",
+                },
+            )
+    else:
         local_sdf = _local_conformer_sdf(fallback_smiles)
         if local_sdf:
             return Response(
@@ -181,31 +176,27 @@ def _pubchem_asset_by_cid(
                     "X-ChemRD-Structure-Origin": "calculated",
                 },
             )
-    raise HTTPException(502, f"The external structure service is unavailable: {last_error}")
+    raise HTTPException(502, f"The external structure service is unavailable and no local fallback could be generated: {last_error}")
 
 
 @app.get("/api/chemicals/{chemical_id}/structure-2d")
 def chemical_structure_2d(chemical_id: str):
-    return _pubchem_asset(chemical_id, "2d")
+    return _chemical_structure_asset(chemical_id, "2d")
 
 
 @app.get("/api/chemicals/{chemical_id}/conformer-3d")
 def chemical_conformer_3d(chemical_id: str):
-    return _pubchem_asset(chemical_id, "3d")
+    return _chemical_structure_asset(chemical_id, "3d")
 
 
-@app.get("/api/pubchem/{cid}/structure-2d")
-def pubchem_structure_2d(cid: str):
-    if not cid.isdigit():
-        raise HTTPException(400, "PubChem CID must be numeric")
-    return _pubchem_asset_by_cid(cid, "2d")
+@app.get("/api/live-structure/2d")
+def live_structure_2d(smiles: str | None = Query(default=None), name: str | None = Query(default=None)):
+    return _structure_asset("2d", fallback_smiles=smiles, fallback_name=name)
 
 
-@app.get("/api/pubchem/{cid}/conformer-3d")
-def pubchem_conformer_3d(cid: str, smiles: str | None = Query(default=None), name: str | None = Query(default=None)):
-    if not cid.isdigit():
-        raise HTTPException(400, "PubChem CID must be numeric")
-    return _pubchem_asset_by_cid(cid, "3d", fallback_smiles=smiles, fallback_name=name)
+@app.get("/api/live-structure/3d")
+def live_structure_3d(smiles: str | None = Query(default=None), name: str | None = Query(default=None)):
+    return _structure_asset("3d", fallback_smiles=smiles, fallback_name=name)
 
 
 @app.get("/api/library/folders")
@@ -358,7 +349,7 @@ def assistant(request: AssistantRequest):
     q = request.question.lower()
     citations = []
     if chemical:
-        citations.append({"id": "src-pubchem-demo", "label": "Identity reference", "reason": "chemical identifiers and formula"})
+        citations.append({"id": "src-chemical-identity-demo", "label": "Chemical identity reference", "reason": "chemical identifiers and formula"})
         citations.append({"id": "src-lab-thermal", "label": "Pilot thermal run TGA-024", "reason": "internal measured thermal observations"})
     else:
         citations.append({"id": "src-journal-phenolic", "label": "Phenolic resin review", "reason": "literature context"})

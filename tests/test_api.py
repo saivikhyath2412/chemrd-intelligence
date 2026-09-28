@@ -34,7 +34,7 @@ def test_search_and_chemical_provenance():
     assert all("source_title" in prop for prop in record["properties"])
 
 
-def test_paclitaxel_uses_nih3d_fallback(monkeypatch):
+def test_structure_proxy_uses_cactus_and_keeps_3d_origin_explicit(monkeypatch):
     class FakeResponse:
         def __enter__(self):
             return self
@@ -43,7 +43,7 @@ def test_paclitaxel_uses_nih3d_fallback(monkeypatch):
             return False
 
         def read(self):
-            return b"Paclitaxel\n  NIH 3D\n  1  0  0  0\nM  END\n"
+            return b"Paclitaxel\n  Cactus 3D\n  1  0  0  0\nM  END\n"
 
     seen = []
 
@@ -52,12 +52,12 @@ def test_paclitaxel_uses_nih3d_fallback(monkeypatch):
         return FakeResponse()
 
     monkeypatch.setattr(main_module, "urlopen", fake_urlopen)
-    response = main_module._pubchem_asset_by_cid("36314", "3d", fallback_name="Paclitaxel")
+    response = main_module._structure_asset("3d", fallback_smiles="CC(C)O", fallback_name="isopropanol")
 
     assert response.status_code == 200
     assert response.headers["x-chemrd-structure-origin"] == "model_predicted"
-    assert "NIH 3D" in response.headers["x-chemrd-structure-source"]
-    assert seen == ["https://3d.nih.gov/api/files/94543"]
+    assert "Cactus" in response.headers["x-chemrd-structure-source"]
+    assert seen == ["https://cactus.nci.nih.gov/chemical/structure/CC%28C%29O/file?format=sdf&get3d=true"]
 
 
 def test_analysis_graph_and_connector_preview():
@@ -96,9 +96,9 @@ def test_live_research_endpoint_keeps_provider_contract(monkeypatch):
     monkeypatch.setattr(main_module, "live_research", lambda query: {
         "query": query,
         "results": [{"type": "live_chemical", "name": "Paclitaxel", "source_url": "https://example.test/paclitaxel"}],
-        "citations": [{"id": "pubchem-36314", "label": "PubChem compound record", "url": "https://example.test/paclitaxel", "reason": "chemical"}],
+        "citations": [{"id": "chemical-identity-36314", "label": "Chemical identity record", "url": "https://example.test/paclitaxel", "reason": "chemical"}],
         "answer": "Live result",
-        "providers": {"PubChem": {"status": "ok", "records": 1}},
+        "providers": {"Chemical identity (Cactus/OPSIN)": {"status": "ok", "records": 1}},
         "retrieved_at": "2026-09-27T00:00:00+00:00",
     })
     response = client.get("/api/research/live", params={"q": "Paclitaxel"})
@@ -120,11 +120,11 @@ def test_live_assistant_uses_ai_synthesis_only_in_assistant_route(monkeypatch):
             "iupac_name": "demo IUPAC name",
             "inchikey": "demo-key",
             "source_url": "https://example.test/paclitaxel",
-            "source": {"id": "pubchem-demo", "title": "PubChem demo", "license": "public"},
+            "source": {"id": "chemical-identity-demo", "title": "Chemical identity demo", "license": "public"},
         }],
-        "citations": [{"id": "pubchem-demo", "label": "PubChem demo", "url": "https://example.test/paclitaxel", "reason": "chemical"}],
+        "citations": [{"id": "chemical-identity-demo", "label": "Chemical identity demo", "url": "https://example.test/paclitaxel", "reason": "chemical"}],
         "answer": "retrieval fallback",
-        "providers": {"PubChem": {"status": "ok", "records": 1}},
+        "providers": {"Chemical identity (Cactus/OPSIN)": {"status": "ok", "records": 1}},
         "retrieved_at": "2026-09-27T00:00:00+00:00",
     })
     monkeypatch.setattr(main_module, "synthesize", lambda question, evidence: ("AI answer [S1]", None))
@@ -164,6 +164,58 @@ def test_chemical_name_parser_handles_greek_prefix_and_conversation():
     assert _entity_candidate("β-Cyclodextrin tell me about it") == "beta-Cyclodextrin"
     assert _identity_intent("tell me about paclitaxel")
     assert _is_generic_follow_up("Tell me about it")
+
+
+def test_chemical_identity_lookup_uses_cactus_and_rdkit_provenance(monkeypatch):
+    import backend.app.live_research as live
+
+    def fake_fetch_text(url, accept="text/plain"):
+        if url.endswith("/smiles"):
+            return "CCO\n", None
+        if url.endswith("/stdinchi"):
+            return "InChI=1S/C2H6O/c1-2-3/h3H,2H2,1H3\n", None
+        if url.endswith("/stdinchikey"):
+            return "LFQSCWFLJHTTHZ-UHFFFAOYSA-N\n", None
+        return "ethanol\nethyl alcohol\n64-17-5\n", None
+
+    monkeypatch.setattr(live, "_fetch_text", fake_fetch_text)
+    monkeypatch.setattr(live, "_rdkit_descriptors", lambda smiles: {"formula": "C2H6O", "molecular_weight": 46.07, "tpsa": 20.23})
+    record, error = live.chemical_identity_lookup("ethanol")
+    assert error is None
+    assert record["id"].startswith("chemical-")
+    assert record["smiles"] == "CCO"
+    assert record["cas_numbers"] == ["64-17-5"]
+    assert record["source"]["publisher"] == "NCI/CADD Cactus"
+    assert record["source"]["metadata"]["descriptor_origin"] == "calculated locally with RDKit"
+    assert "PubChem" not in str(record)
+
+
+def test_chemical_identity_lookup_can_fall_back_to_chebi(monkeypatch):
+    import backend.app.live_research as live
+
+    monkeypatch.setattr(live, "_fetch_text", lambda url, accept="text/plain": (None, "offline"))
+
+    def fake_fetch_json(url):
+        if "/es_search/" in url:
+            return {"results": [{"_source": {"chebi_accession": "CHEBI:15365", "name": "aspirin"}}]}, None
+        return {
+            "name": "aspirin",
+            "chemical_data": {"formula": "C9H8O4", "mass": 180.16},
+            "default_structure": {
+                "smiles": "CC(=O)Oc1ccccc1C(=O)O",
+                "standard_inchi": "InChI=1S/C9H8O4/c1-6(10)13-8-5-3-2-4-7(8)9(11)12/h2-5H,1H3,(H,11,12)",
+                "standard_inchi_key": "BSYNRYMUTXBXSQ-UHFFFAOYSA-N",
+            },
+            "names": {},
+        }, None
+
+    monkeypatch.setattr(live, "_fetch_json", fake_fetch_json)
+    monkeypatch.setattr(live, "_rdkit_descriptors", lambda smiles: {"formula": "C9H8O4", "molecular_weight": 180.16})
+    record, error = live.chemical_identity_lookup("aspirin")
+    assert error is None
+    assert record["source"]["publisher"] == "ChEBI"
+    assert record["source"]["metadata"]["chebi_id"] == "CHEBI:15365"
+    assert record["inchikey"] == "BSYNRYMUTXBXSQ-UHFFFAOYSA-N"
 
 
 def test_live_assistant_does_not_replace_ambiguous_query_with_seeded_demo(monkeypatch):
@@ -246,7 +298,7 @@ def test_save_live_chemical_creates_library_record_with_provenance():
     response = client.post("/api/library/chemicals", json={
         "folder_id": folder_id,
         "record": {
-            "id": "pubchem-test-live-123",
+            "id": "chemical-test-live-123",
             "name": "Test live compound",
             "formula": "C2H6O",
             "molecular_weight": 46.07,
@@ -275,12 +327,12 @@ def test_save_live_chemical_creates_library_record_with_provenance():
     assert record["conformer_3d_url"] == f"/api/chemicals/{item['chemical_id']}/conformer-3d"
 
 
-def test_save_live_chemical_persists_pubchem_properties_with_origin():
+def test_save_live_chemical_persists_provider_properties_with_origin():
     folder_id = client.get("/api/library/folders").json()[0]["id"]
     response = client.post("/api/library/chemicals", json={
         "folder_id": folder_id,
         "record": {
-            "id": "pubchem-test-live-properties",
+            "id": "chemical-test-live-properties",
             "name": "Test property compound",
             "formula": "C3H8O",
             "molecular_weight": 60.1,
@@ -289,7 +341,7 @@ def test_save_live_chemical_persists_pubchem_properties_with_origin():
             "tpsa": 20.2,
             "h_bond_donors": 1,
             "iupac_name": "propan-1-ol",
-            "source": {"id": "source-test-live-properties", "title": "PubChem test source", "metadata": {"cid": 987654}},
+            "source": {"id": "source-test-live-properties", "title": "Cactus test source", "metadata": {"provider": "NCI/CADD Cactus"}},
         },
     })
     assert response.status_code == 200
@@ -297,7 +349,7 @@ def test_save_live_chemical_persists_pubchem_properties_with_origin():
     props = client.get(f"/api/chemicals/{chemical_id}").json()["properties"]
     by_name = {prop["property_name"]: prop for prop in props}
     assert by_name["xlogp"]["origin"] == "calculated"
-    assert by_name["tpsa"]["source_title"] == "PubChem test source"
+    assert by_name["tpsa"]["source_title"] == "Cactus test source"
     assert by_name["iupac_name"]["origin"] == "literature_extracted"
 
 
@@ -308,12 +360,12 @@ def test_structure_asset_proxy_keeps_public_assets_same_origin(monkeypatch):
     saved = client.post("/api/library/chemicals", json={
         "folder_id": folder_id,
         "record": {
-            "id": "pubchem-asset-proxy-test",
+            "id": "chemical-asset-proxy-test",
             "name": "Asset proxy test compound",
             "formula": "C2H6O",
             "molecular_weight": 46.07,
             "smiles": "CCO",
-            "source": {"id": "source-asset-proxy-test", "title": "PubChem asset test", "metadata": {"cid": 12345}},
+            "source": {"id": "source-asset-proxy-test", "title": "Cactus asset test", "metadata": {"provider": "NCI/CADD Cactus"}},
         },
     })
     assert saved.status_code == 200
@@ -338,12 +390,12 @@ def test_structure_asset_proxy_keeps_public_assets_same_origin(monkeypatch):
     monkeypatch.setattr(main_module, "urlopen", fake_urlopen)
     image = client.get(f"/api/chemicals/{chemical_id}/structure-2d")
     sdf = client.get(f"/api/chemicals/{chemical_id}/conformer-3d")
-    public_image = client.get("/api/pubchem/12345/structure-2d")
+    public_image = client.get("/api/live-structure/2d", params={"smiles": "CCO", "name": "ethanol"})
     assert image.status_code == 200
     assert image.headers["content-type"].startswith("image/png")
     assert sdf.status_code == 200
     assert sdf.headers["content-type"].startswith("chemical/x-mdl-sdfile")
     assert public_image.status_code == 200
     assert len(seen) == 3
-    assert "/PNG?image_size=large" in seen[0][0]
-    assert "/SDF?record_type=3d" in seen[1][0]
+    assert "/chemical/structure/CCO/image" in seen[0][0]
+    assert "/chemical/structure/CCO/file?format=sdf&get3d=true" in seen[1][0]

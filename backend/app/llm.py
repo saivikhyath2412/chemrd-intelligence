@@ -168,7 +168,7 @@ def _prompt_parts(question: str, evidence: dict[str, Any]) -> tuple[str, str]:
         "If there are no relevant sources, answer normally and add a brief line saying 'General answer; no relevant source was retrieved for this response.' "
         "Do not invent a citation for a general-knowledge statement. "
         "A title alone is not evidence for a scientific claim. If the retrieved evidence is weak or unrelated, say that plainly. "
-        "Never invent missing values. Separate PubChem identity facts from paper findings and label uncertainty. "
+        "Never invent missing values. Separate chemical-provider identity facts from paper findings and label uncertainty. "
         "Cite evidence inline as [S1], [S2], etc., matching source_number. "
         "Do not give unsafe experimental instructions beyond the evidence."
     )

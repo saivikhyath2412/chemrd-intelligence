@@ -105,7 +105,7 @@ class Store:
         demo_formulations = ("form-fp-01", "form-resole-base")
         demo_experiments = ("exp-tga-024", "exp-dsc-011", "exp-ftir-007")
         demo_chemicals = ("chem-phenol", "chem-resole", "chem-dopo", "chem-boric", "chem-formaldehyde")
-        demo_sources = ("src-pubchem-demo", "src-journal-phenolic", "src-lab-thermal", "src-patent-dopo")
+        demo_sources = ("src-chemical-identity-demo", "src-journal-phenolic", "src-lab-thermal", "src-patent-dopo")
         with closing(self.connect()) as conn:
             for table, ids in (("analyses", demo_analyses), ("reactions", demo_reactions), ("formulations", demo_formulations), ("experiments", demo_experiments)):
                 placeholders = ",".join("?" for _ in ids)
@@ -142,7 +142,7 @@ class Store:
             if conn.execute("SELECT COUNT(*) FROM chemicals").fetchone()[0]:
                 return
             sources = [
-                ("src-pubchem-demo", "PubChem-style identity reference", "public_database", "NCBI", "https://pubchem.ncbi.nlm.nih.gov/", "public-domain facts / verify terms", utc_now(), "{}"),
+                ("src-chemical-identity-demo", "NCI/CADD chemical identity reference", "public_database", "NCI/CADD", "https://cactus.nci.nih.gov/chemical/structure_documentation", "Public service; verify current provider terms", utc_now(), "{\"provider\":\"NCI/CADD Cactus\"}"),
                 ("src-journal-phenolic", "Phenolic resins for high-temperature composites", "paper", "Materials Chemistry Review", "https://doi.org/10.0000/demo-phenolic", "licensed research reference", utc_now(), '{"doi":"10.0000/demo-phenolic"}'),
                 ("src-lab-thermal", "ChemR&D pilot thermal run TGA-024", "internal_experiment", "ChemR&D pilot lab", "", "company-internal", utc_now(), '{"instrument":"TGA/DSC-01"}'),
                 ("src-patent-dopo", "Phosphorus flame-retardant epoxy compositions", "patent", "Example Patent Office", "https://patents.example/EP-DEMO-2042", "licensed patent record", utc_now(), '{"patent":"EP-DEMO-2042"}'),
@@ -158,7 +158,7 @@ class Store:
             for row in chemicals:
                 conn.execute("INSERT INTO chemicals VALUES (?,?,?,?,?,?,?,?,?,?,?)", (*row, structure_svg(row[4])))
             properties = [
-                ("pv-phenol-mp", "chem-phenol", "melting_point", "40.5", 40.5, "°C", "measured", "src-pubchem-demo", "curated reference", 0.98, "Reference value; not a resin specification."),
+                ("pv-phenol-mp", "chem-phenol", "melting_point", "40.5", 40.5, "°C", "measured", "src-chemical-identity-demo", "curated reference", 0.98, "Reference value; not a resin specification."),
                 ("pv-phenol-logp", "chem-phenol", "logP", "1.46", 1.46, None, "calculated", None, "RDKit Crippen when available", 0.82, "Calculation provenance kept separate from measured values."),
                 ("pv-resole-tg", "chem-resole", "glass_transition", "92", 92, "°C", "literature_extracted", "src-journal-phenolic", "table 2 extraction", 0.79, "Demo extracted range center."),
                 ("pv-resole-char", "chem-resole", "char_yield_800c", "48", 48, "%", "measured", "src-lab-thermal", "TGA-024", 0.97, "Nitrogen atmosphere."),
@@ -220,12 +220,14 @@ class Store:
         if live:
             metadata = json.loads(live[0]["metadata"] or "{}")
             source_meta = (metadata.get("source") or {}).get("metadata") or {}
-            cid = source_meta.get("cid")
-            if cid:
-                row["pubchem_cid"] = str(cid)
+            source_rows = self._rows("SELECT publisher, url FROM sources WHERE id = ?", (live[0]["source_id"],))
+            source = source_rows[0] if source_rows else {}
+            remote_id = metadata.get("remote_id") or source_meta.get("remote_id")
+            if remote_id:
+                row["identity_provider"] = source.get("publisher") or source_meta.get("provider") or "Public chemistry provider"
                 row["structure_2d_url"] = f"/api/chemicals/{chemical_id}/structure-2d"
                 row["conformer_3d_url"] = f"/api/chemicals/{chemical_id}/conformer-3d"
-                row["live_source_url"] = f"https://pubchem.ncbi.nlm.nih.gov/compound/{cid}"
+                row["live_source_url"] = source.get("url") or metadata.get("source_url")
         return row
 
     def library_folders(self) -> list[dict]:
@@ -337,12 +339,12 @@ class Store:
                     continue
                 conn.execute(
                     "INSERT OR REPLACE INTO property_values (id, chemical_id, property_name, value_text, numeric_value, unit, origin, source_id, method, confidence, notes) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                    (f"pv-live-{chemical_id}-{property_name}", chemical_id, property_name, str(value), float(value), unit, "calculated", source_id, "PubChem computed property", None, "Retrieved from the cited PubChem compound record; verify current source semantics."),
+                    (f"pv-live-{chemical_id}-{property_name}", chemical_id, property_name, str(value), float(value), unit, "calculated", source_id, "RDKit calculated descriptor", None, "Calculated locally from the provider-returned structure; not a measured value."),
                 )
             if record.get("iupac_name"):
                 conn.execute(
                     "INSERT OR REPLACE INTO property_values (id, chemical_id, property_name, value_text, numeric_value, unit, origin, source_id, method, confidence, notes) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                    (f"pv-live-{chemical_id}-iupac_name", chemical_id, "iupac_name", record["iupac_name"], None, None, "literature_extracted", source_id, "PubChem identity field", None, "Identity nomenclature from the cited PubChem compound record."),
+                    (f"pv-live-{chemical_id}-iupac_name", chemical_id, "iupac_name", record["iupac_name"], None, None, "literature_extracted", source_id, "Provider identity field", None, "Identity nomenclature returned by the cited chemical identity provider."),
                 )
             existing = conn.execute("SELECT id FROM library_items WHERE folder_id = ? AND item_type = 'chemical' AND chemical_id = ?", (folder_id, chemical_id)).fetchone()
             if existing:

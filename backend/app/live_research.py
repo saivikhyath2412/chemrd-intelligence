@@ -9,6 +9,7 @@ live observations from seeded or model-generated content.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import threading
@@ -53,6 +54,17 @@ def _fetch_json(url: str) -> tuple[dict[str, Any] | None, str | None]:
     except HTTPError as exc:
         return None, f"HTTP {exc.code}"
     except (URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
+        return None, str(exc) or exc.__class__.__name__
+
+
+def _fetch_text(url: str, accept: str = "text/plain") -> tuple[str | None, str | None]:
+    request = Request(url, headers={"User-Agent": USER_AGENT, "Accept": accept})
+    try:
+        with urlopen(request, timeout=TIMEOUT_SECONDS) as response:
+            return response.read().decode("utf-8", errors="replace"), None
+    except HTTPError as exc:
+        return None, f"HTTP {exc.code}"
+    except (URLError, TimeoutError, OSError) as exc:
         return None, str(exc) or exc.__class__.__name__
 
 
@@ -125,61 +137,182 @@ def _identity_intent(query: str) -> bool:
     )
 
 
-def pubchem_lookup(query: str) -> tuple[dict[str, Any] | None, str | None]:
+def _rdkit_descriptors(smiles: str | None) -> dict[str, Any]:
+    """Calculate descriptors locally and label them as calculated, never measured."""
+    if not smiles:
+        return {}
+    try:
+        from rdkit import Chem
+        from rdkit.Chem import Crippen, Descriptors, Lipinski, rdMolDescriptors
+
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            return {}
+        return {
+            "formula": rdMolDescriptors.CalcMolFormula(mol),
+            "molecular_weight": round(Descriptors.MolWt(mol), 5),
+            "exact_mass": round(Descriptors.ExactMolWt(mol), 5),
+            "monoisotopic_mass": round(Descriptors.ExactMolWt(mol), 5),
+            "xlogp": round(Crippen.MolLogP(mol), 5),
+            "tpsa": round(rdMolDescriptors.CalcTPSA(mol), 5),
+            "h_bond_donors": Lipinski.NumHDonors(mol),
+            "h_bond_acceptors": Lipinski.NumHAcceptors(mol),
+            "rotatable_bonds": Lipinski.NumRotatableBonds(mol),
+            "heavy_atoms": Lipinski.HeavyAtomCount(mol),
+            "charge": Chem.GetFormalCharge(mol),
+            "complexity": round(Descriptors.BertzCT(mol), 5),
+            "covalently_bonded_units": rdMolDescriptors.CalcNumFragments(mol),
+        }
+    except Exception:
+        return {}
+
+
+def _first_nonempty(*values: Any) -> Any:
+    return next((value for value in values if value not in (None, "", [], {})), None)
+
+
+def _chebi_lookup(candidate: str) -> tuple[dict[str, Any] | None, str | None, list[str]]:
+    """Best-effort ChEBI fallback for curated small-molecule records."""
+    base = "https://www.ebi.ac.uk/chebi/backend/api/public"
+    endpoints = [f"{base}/es_search/?query={quote(candidate, safe='')}&size=1"]
+    search, error = _fetch_json(endpoints[0])
+    if error:
+        return None, error, endpoints
+    hits = (search or {}).get("results") or []
+    source = hits[0].get("_source", {}) if hits and isinstance(hits[0], dict) else {}
+    accession = source.get("chebi_accession") or source.get("id")
+    if not accession:
+        return None, "No ChEBI match", endpoints
+    chebi_id = str(accession).split(":")[-1]
+    endpoints.append(f"{base}/compound/{chebi_id}/")
+    detail, error = _fetch_json(endpoints[-1])
+    if error or not detail:
+        return None, error or "No ChEBI compound record", endpoints
+    chemical_data = detail.get("chemical_data") or {}
+    structure_data = detail.get("default_structure") or {}
+    names = detail.get("names") or {}
+    synonyms: list[str] = []
+    for values in names.values() if isinstance(names, dict) else []:
+        if isinstance(values, list):
+            synonyms.extend(str(item.get("name")) for item in values if isinstance(item, dict) and item.get("name"))
+    record = {
+        "name": detail.get("name") or source.get("name") or candidate.title(),
+        "formula": chemical_data.get("formula"),
+        "molecular_weight": chemical_data.get("mass"),
+        "smiles": structure_data.get("smiles"),
+        "inchi": structure_data.get("standard_inchi"),
+        "inchikey": structure_data.get("standard_inchi_key"),
+        "cas_numbers": [value for value in synonyms if re.fullmatch(r"\d{2,7}-\d{2}-\d", value)],
+        "synonyms": list(dict.fromkeys([candidate, *synonyms]))[:20],
+        "chebi_id": f"CHEBI:{chebi_id}",
+    }
+    return record, None, endpoints
+
+
+def chemical_identity_lookup(query: str) -> tuple[dict[str, Any] | None, str | None]:
+    """Resolve a chemical through Cactus first, then OPSIN."""
     candidate = _entity_candidate(query)
-    properties = ",".join([
-        "IUPACName", "MolecularFormula", "MolecularWeight", "CanonicalSMILES",
-        "IsomericSMILES", "InChI", "InChIKey", "XLogP", "TPSA", "ExactMass",
-        "MonoisotopicMass", "HBondDonorCount", "HBondAcceptorCount",
-        "RotatableBondCount", "HeavyAtomCount", "Charge", "Complexity",
-    ])
-    url = "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/{}/property/{}/JSON".format(quote(candidate, safe=""), properties)
-    payload, error = _fetch_json(url)
-    property_rows = (payload or {}).get("PropertyTable", {}).get("Properties", [])
-    if not property_rows:
-        return None, error or "No chemical match"
-    item = property_rows[0]
-    cid = item.get("CID")
-    synonyms_payload, synonyms_error = _fetch_json(
-        f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/{cid}/synonyms/JSON"
-    )
-    synonyms = (synonyms_payload or {}).get("InformationList", {}).get("Information", [{}])[0].get("Synonym", [])
+    encoded = quote(candidate, safe="")
+    cactus_base = f"https://cactus.nci.nih.gov/chemical/structure/{encoded}"
+    provider_errors: list[str] = []
+    smiles = inchi = inchikey = None
+    cactus_names: list[str] = []
+    used_provider = None
+    endpoints: list[str] = []
+
+    for representation, target in (("smiles", "smiles"), ("stdinchi", "inchi"), ("stdinchikey", "inchikey"), ("names", "names")):
+        text, error = _fetch_text(f"{cactus_base}/{representation}")
+        endpoints.append(f"{cactus_base}/{representation}")
+        if error:
+            provider_errors.append(f"Cactus {representation}: {error}")
+            continue
+        value = (text or "").strip()
+        if not value:
+            continue
+        used_provider = "NCI/CADD Cactus"
+        if target == "smiles":
+            smiles = value.splitlines()[0].strip()
+        elif target == "inchi":
+            inchi = value.splitlines()[0].strip()
+        elif target == "inchikey":
+            inchikey = value.splitlines()[0].strip()
+        else:
+            cactus_names = [line.strip() for line in value.splitlines() if line.strip()][:40]
+
+    chebi_record = None
+    if not smiles:
+        chebi_record, error, chebi_endpoints = _chebi_lookup(candidate)
+        endpoints.extend(chebi_endpoints)
+        if error:
+            provider_errors.append(f"ChEBI: {error}")
+        elif chebi_record and chebi_record.get("smiles"):
+            used_provider = "ChEBI"
+            smiles = chebi_record.get("smiles")
+            inchi = _first_nonempty(inchi, chebi_record.get("inchi"))
+            inchikey = _first_nonempty(inchikey, chebi_record.get("inchikey"))
+
+    opsin_payload = None
+    if not smiles:
+        opsin_url = f"https://www.ebi.ac.uk/opsin/ws/{encoded}.json"
+        opsin_payload, error = _fetch_json(opsin_url)
+        endpoints.append(opsin_url)
+        if error:
+            provider_errors.append(f"OPSIN: {error}")
+        elif opsin_payload and opsin_payload.get("smiles"):
+            used_provider = "OPSIN"
+            smiles = opsin_payload.get("smiles")
+            inchi = _first_nonempty(inchi, opsin_payload.get("stdinchi"), opsin_payload.get("inchi"))
+            inchikey = _first_nonempty(inchikey, opsin_payload.get("stdinchikey"))
+
+    if not smiles:
+        return None, "; ".join(provider_errors) or "No chemical match"
+
+    calculated = _rdkit_descriptors(smiles)
+    names = [candidate] + ((chebi_record or {}).get("synonyms") or []) + cactus_names
+    if opsin_payload and opsin_payload.get("name"):
+        names.append(str(opsin_payload["name"]))
+    synonyms = list(dict.fromkeys(name for name in names if name))[:20]
     cas_numbers = [value for value in synonyms if re.fullmatch(r"\d{2,7}-\d{2}-\d", value)]
+    normalized_id = hashlib.sha1((inchikey or smiles or candidate).encode("utf-8")).hexdigest()[:16]
+    source_url = (
+        f"{cactus_base}/smiles" if used_provider == "NCI/CADD Cactus"
+        else f"https://www.ebi.ac.uk/chebi/backend/api/public/compound/{(chebi_record or {}).get('chebi_id', '').split(':')[-1]}/" if used_provider == "ChEBI"
+        else f"https://www.ebi.ac.uk/opsin/ws/{encoded}.json"
+    )
+    # Cactus names are synonyms; only OPSIN's normalized name is promoted to
+    # the IUPAC field so a synonym is never silently mislabeled.
+    iupac_name = _first_nonempty((opsin_payload or {}).get("name"))
     return {
-        "id": f"pubchem-{cid}",
+        "id": f"chemical-{normalized_id}",
         "type": "live_chemical",
         "name": candidate.title(),
-        "subtitle": item.get("IUPACName") or "Chemical identity match",
-        "formula": item.get("MolecularFormula"),
-        "molecular_weight": item.get("MolecularWeight"),
-        "smiles": item.get("ConnectivitySMILES") or item.get("CanonicalSMILES"),
-        "isomeric_smiles": item.get("IsomericSMILES"),
-        "inchi": item.get("InChI"),
-        "inchikey": item.get("InChIKey"),
-        "iupac_name": item.get("IUPACName"),
-        "xlogp": item.get("XLogP"),
-        "tpsa": item.get("TPSA"),
-        "exact_mass": item.get("ExactMass"),
-        "monoisotopic_mass": item.get("MonoisotopicMass"),
-        "h_bond_donors": item.get("HBondDonorCount"),
-        "h_bond_acceptors": item.get("HBondAcceptorCount"),
-        "rotatable_bonds": item.get("RotatableBondCount"),
-        "heavy_atoms": item.get("HeavyAtomCount"),
-        "charge": item.get("Charge"),
-        "complexity": item.get("Complexity"),
-        "covalently_bonded_units": item.get("CovalentlyBondedUnitCount"),
+        "subtitle": iupac_name or "Public chemical identity match",
+        "formula": _first_nonempty((opsin_payload or {}).get("formula"), calculated.get("formula")),
+        "molecular_weight": _first_nonempty((opsin_payload or {}).get("molecularWeight"), calculated.get("molecular_weight")),
+        "smiles": smiles,
+        "isomeric_smiles": smiles,
+        "inchi": inchi,
+        "inchikey": inchikey,
+        "iupac_name": iupac_name,
+        **calculated,
         "cas_numbers": cas_numbers[:10],
-        "synonyms": synonyms[:20],
-        "source_url": f"https://pubchem.ncbi.nlm.nih.gov/compound/{cid}",
+        "synonyms": synonyms,
+        "source_url": source_url,
         "source": {
-            "id": f"pubchem-source-{cid}",
-            "title": f"PubChem compound record {cid}",
+            "id": f"chemical-source-{normalized_id}",
+            "title": f"{used_provider or 'Public chemistry'} identity record",
             "source_type": "public_database",
-            "publisher": "NCBI PubChem",
-            "url": f"https://pubchem.ncbi.nlm.nih.gov/compound/{cid}",
-            "license": "Public resource; verify current PubChem terms",
+            "publisher": used_provider or "Public chemistry provider",
+            "url": source_url,
+            "license": "Public service; verify current provider terms before redistribution",
             "accessed_at": now_iso(),
-            "metadata": {"cid": cid, "synonyms_status": "ok" if not synonyms_error else synonyms_error},
+            "metadata": {
+                "provider": used_provider,
+                "chebi_id": (chebi_record or {}).get("chebi_id"),
+                "endpoints": endpoints,
+                "descriptor_origin": "calculated locally with RDKit" if calculated else "not calculated",
+                "provider_errors": provider_errors,
+            },
         },
     }, None
 
@@ -314,9 +447,9 @@ def live_research(query: str) -> dict[str, Any]:
     # article providers do not waste results on generic words like "properties".
     provider_query = _entity_candidate(query) if _identity_intent(query) else query
     jobs = {
-        # Do not send a generic research sentence to PubChem's name endpoint:
-        # PubChem may return an unrelated low-CID match for arbitrary text.
-        "PubChem": lambda: pubchem_lookup(query) if _identity_intent(query) or len(query.split()) <= 2 else (None, "skipped_non_identity_query"),
+        # Do not send a generic research sentence to a chemical name resolver:
+        # identity providers can return an unrelated match for arbitrary text.
+        "Chemical identity (Cactus/OPSIN)": lambda: chemical_identity_lookup(query) if _identity_intent(query) or len(query.split()) <= 2 else (None, "skipped_non_identity_query"),
         "OpenAlex": lambda: openalex_search(provider_query),
         "Crossref": lambda: crossref_search(provider_query),
         "Europe PMC": lambda: europe_pmc_search(provider_query),
@@ -358,7 +491,8 @@ def live_research(query: str) -> dict[str, Any]:
         ]
         if chem.get("cas_numbers"):
             facts.append(f"CAS identifiers: {', '.join(chem['cas_numbers'])}")
-        answer = "Live public-source retrieval found a PubChem identity match.\n\n" + "\n".join(facts) + f"\n\nIt also found {len(papers)} potentially relevant literature records. Identity facts come from PubChem; article metadata and abstracts remain linked to their individual publishers or indexes."
+        provider = (chem.get("source") or {}).get("publisher") or "the configured chemical identity providers"
+        answer = f"Live public-source retrieval found a chemical identity match via {provider}.\n\n" + "\n".join(facts) + f"\n\nIt also found {len(papers)} potentially relevant literature records. Identity facts and locally calculated descriptors are kept separate from article metadata and abstracts, which remain linked to their individual publishers or indexes."
     elif papers:
         answer = f"Live public-source retrieval found {len(papers)} potentially relevant literature records for “{query}”. Results are metadata/abstract-level evidence and should be opened at the cited source before relying on a claim."
     else:

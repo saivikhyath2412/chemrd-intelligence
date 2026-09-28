@@ -5,7 +5,7 @@ ChemR&D is a runnable local MVP for chemistry and materials R&D teams. It combin
 ## What is included
 
 - Universal search across chemicals, experiments, reactions, papers, patents, and formulations.
-- Live open-ended research mode through documented public APIs (PubChem, OpenAlex, Crossref, Europe PMC) with provider status and citations.
+- Live open-ended research mode through documented public APIs (NCI/CADD Cactus, OPSIN, ChEBI, OpenAlex, Crossref, Europe PMC) with provider status and citations.
 - In-app source reader for live results, with an embedded browser panel and external fallback when a publisher blocks iframe embedding.
 - Chemical records with identifiers, SMILES, formula, properties, provenance, and an optional RDKit renderer.
 - Chemical Library folders that can hold saved chemicals plus papers, patents, websites, notes, experiments, files, and other research items.
@@ -34,6 +34,17 @@ Open http://127.0.0.1:8000. Interactive API docs are at http://127.0.0.1:8000/do
 The assistant and Universal Search can query live public sources. Enable “Search documented public APIs live” in Universal Search or “Search live public sources” in the assistant. The API equivalents are `GET /api/research/live?q=...`, `GET /api/search?q=...&live=true`, and `POST /api/assistant` with `{ "question": "...", "live": true }`.
 
 Live chemical identity cards and assistant identity answers include a **Save to chemical library** action. The folder picker lets a user save the canonical chemical record or any related research item into a chosen folder. Folder contents are separate from the canonical chemical table, so a folder can organize mixed research material without changing chemical identity or provenance.
+
+## Chemical identity and structure providers
+
+The legacy NCBI provider is not required by this build. Live chemical lookups use the following provider stack:
+
+- NCI/CADD Chemical Identifier Resolver (Cactus) for names, CAS/registry identifiers, SMILES, InChI, InChIKey, synonyms, 2-D depictions, and generated SDF conformers.
+- OPSIN as a fallback for systematic chemical names and IUPAC-style name-to-structure conversion.
+- ChEBI as a curated small-molecule fallback with identifiers, synonyms, formula, mass, and structure records.
+- RDKit, when installed, for locally calculated formula, mass, logP, TPSA, hydrogen-bond counts, rotatable bonds, and 2-D/3-D fallbacks.
+
+Provider-returned identity, locally calculated descriptors, and experimental/literature values remain separate in the property ledger. The relevant API routes are `/api/research/live`, `/api/live-structure/2d`, `/api/live-structure/3d`, `/api/chemicals/{chemical_id}/structure-2d`, and `/api/chemicals/{chemical_id}/conformer-3d`.
 
 ### Windows desktop executable
 
@@ -114,6 +125,6 @@ Live retrieval uses documented public APIs instead of copying the open web. It r
 
 1. Move repository methods to SQLAlchemy 2 + PostgreSQL/pgvector and add migrations through Alembic.
 2. Add authentication, workspace-level authorization, object storage, audit logs, and background ingestion jobs.
-3. Add licensed PubChem/CAS/patent connectors with rate limits and source-specific attribution.
+3. Add licensed registry, CAS, patent, and vendor connectors with rate limits and source-specific attribution.
 4. Add RDKit standardization, descriptors, substructure search, and embedding generation.
 5. Replace the demo assistant with a retrieval pipeline that filters by source license and cites retrieved records.
