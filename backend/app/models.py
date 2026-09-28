@@ -42,3 +42,61 @@ class LibraryItemCreate(BaseModel):
 class SaveLiveChemicalRequest(BaseModel):
     folder_id: str = Field(min_length=1, max_length=160)
     record: dict[str, Any]
+
+
+class ChemicalParam(BaseModel):
+    id: str
+    name: str
+    formula: str | None = None
+    cas_number: str | None = None
+    smiles: str | None = None
+    molecular_weight: float | None = None
+    quantity: float | None = None
+    quantity_unit: str = "g"
+    role: str = "Reactant"
+    temp_min: float = -20.0
+    temp_max: float = 150.0
+    pressure: float = 1.0
+    ph: float = 7.0
+    concentration: float = 100.0
+    concentration_unit: str = "w/w"
+    freezing_point: float | None = None
+    melting_point: float | None = None
+    boiling_point: float | None = None
+    density: float | None = None
+    molar_mass: float | None = None
+    state_at_room_temp: str = "Solid"
+    solubility: str = "Slightly Soluble"
+    hazards: list[str] = Field(default_factory=list)
+    cat_mechanism: str | None = None
+    cat_ea_reduction: float | None = None
+    cat_selectivity: str | None = None
+
+
+class GlobalConditions(BaseModel):
+    reaction_temp: float = 25.0
+    duration: float = 1.0
+    duration_unit: str = "hours"
+    atmosphere: str = "Air"
+    stirring_speed: float = 0.0
+    heating_rate: float | None = None
+    cooling_rate: float | None = None
+
+
+class ExperimentCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=240)
+    objective: str = Field(min_length=1, max_length=2000)
+    experiment_type: str = "Custom"
+    owner: str = Field(default="", max_length=120)
+    date: str = Field(default="")
+    chemical_ids: list[str] = Field(default_factory=list)
+    status: str = "planned"
+
+
+class SimulationRequest(BaseModel):
+    name: str
+    objective: str
+    experiment_type: str = "Custom"
+    chemicals: list[ChemicalParam]
+    global_conditions: GlobalConditions
+

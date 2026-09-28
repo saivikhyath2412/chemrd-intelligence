@@ -26,9 +26,16 @@ for _dotenv_path in _dotenv_paths:
 
 from .connectors.registry import CONNECTORS, list_connectors
 from .live_research import live_research
+<<<<<<< Updated upstream
 from .llm import relevant_evidence, synthesize
 from .models import AssistantRequest, IngestPreviewRequest, LibraryFolderCreate, LibraryItemCreate, SaveLiveChemicalRequest
+=======
+from .llm import synthesize
+from .models import AssistantRequest, IngestPreviewRequest, LibraryFolderCreate, LibraryItemCreate, SaveLiveChemicalRequest, ExperimentCreate, SimulationRequest
+from .simulation import simulate_experiment
+>>>>>>> Stashed changes
 from .store import Store
+
 
 
 store = Store()
@@ -252,6 +259,23 @@ def sources():
 @app.get("/api/experiments")
 def experiments():
     return store.experiments()
+
+
+@app.post("/api/experiments")
+def create_experiment_endpoint(request: ExperimentCreate):
+    try:
+        return store.create_experiment(request.model_dump())
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/experiments/simulate")
+def simulate_experiment_endpoint(request: SimulationRequest):
+    try:
+        return simulate_experiment(request)
+    except Exception as exc:
+        raise HTTPException(500, f"Simulation failed: {exc}") from exc
+
 
 
 @app.get("/api/formulations")

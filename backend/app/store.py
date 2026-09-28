@@ -86,6 +86,10 @@ class Store:
     def initialize(self) -> None:
         with closing(self.connect()) as conn:
             conn.executescript(SCHEMA)
+            try:
+                conn.execute("ALTER TABLE experiments ADD COLUMN experiment_type TEXT DEFAULT 'Custom'")
+            except sqlite3.OperationalError:
+                pass
             timestamp = utc_now()
             conn.executemany(
                 "INSERT OR IGNORE INTO library_folders (id, name, description, created_at, updated_at) VALUES (?,?,?,?,?)",
@@ -95,6 +99,7 @@ class Store:
             )
             conn.commit()
         self.clear_seed_data()
+
 
     def clear_seed_data(self) -> None:
         """Remove only the app's known demo rows when clean mode is enabled."""
@@ -173,7 +178,7 @@ class Store:
                 ("exp-dsc-011", "Phenolic cure window", "completed", "Locate cure exotherm and post-cure Tg for three resin lots.", '["chem-phenol","chem-resole"]', "M. Iyer", "2026-08-04", "2026-08-20", "src-journal-phenolic"),
                 ("exp-ftir-007", "Boron-resole compatibility", "planned", "Confirm borate coordination signatures by FTIR.", '["chem-resole","chem-boric"]', "S. Nair", "2026-10-02", "2026-10-02", "src-lab-thermal"),
             ]
-            conn.executemany("INSERT INTO experiments VALUES (?,?,?,?,?,?,?,?,?)", experiments)
+            conn.executemany("INSERT INTO experiments (id, name, status, objective, chemical_ids, owner, started_at, updated_at, source_id) VALUES (?,?,?,?,?,?,?,?,?)", experiments)
             formulations = [
                 ("form-fp-01", "FR-Resole Pilot 01", '{"chem-resole":72,"chem-dopo":18,"chem-boric":10}', "Halogen-free flame-retardant resin", "screening", "src-lab-thermal"),
                 ("form-resole-base", "Resole Base R-01", '{"chem-phenol":82,"chem-formaldehyde":18}', "Reference phenolic resin", "reference", "src-journal-phenolic"),
@@ -361,6 +366,37 @@ class Store:
         for row in rows:
             row["chemical_ids"] = json.loads(row["chemical_ids"] or "[]")
         return rows
+
+    def create_experiment(self, payload: dict[str, Any]) -> dict:
+        exp_id = "exp-" + uuid.uuid4().hex[:10]
+        timestamp = utc_now()
+        started_at = payload.get("date") or timestamp[:10]
+        chemical_ids = payload.get("chemical_ids") or []
+        with closing(self.connect()) as conn:
+            conn.execute(
+                """INSERT INTO experiments (id, name, status, objective, chemical_ids, owner, started_at, updated_at, source_id, experiment_type)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    exp_id,
+                    payload["name"].strip(),
+                    payload.get("status", "planned"),
+                    payload.get("objective", "").strip(),
+                    json.dumps(chemical_ids),
+                    payload.get("owner", "").strip() or "Lead Researcher",
+                    started_at,
+                    timestamp,
+                    payload.get("source_id"),
+                    payload.get("experiment_type", "Custom"),
+                ),
+            )
+            conn.commit()
+        rows = self._rows("SELECT * FROM experiments WHERE id = ?", (exp_id,))
+        if rows:
+            row = rows[0]
+            row["chemical_ids"] = json.loads(row["chemical_ids"] or "[]")
+            return row
+        return {"id": exp_id, **payload}
+
 
     def formulations(self) -> list[dict]:
         rows = self._rows("SELECT * FROM formulations ORDER BY name")

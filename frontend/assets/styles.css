@@ -12,3 +12,272 @@
 .chem-formula{font-family:Georgia,'Times New Roman',serif;white-space:nowrap;letter-spacing:.01em}.chem-formula sub,.chem-formula sup{font-size:.72em;line-height:0;position:relative;vertical-align:baseline}.chem-formula sub{bottom:-.25em}.chem-formula sup{top:-.45em}
 .graph-lookup{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-bottom:17px}.graph-lookup-controls{display:flex;gap:8px;min-width:min(520px,100%)}.graph-lookup-controls input{flex:1;min-width:220px}.graph-workspace{display:grid;grid-template-columns:1.25fr 1fr;gap:17px;align-items:start}.graph-node{outline:none}.chemical-node{cursor:pointer}.chemical-node:hover circle,.chemical-node:focus circle{stroke:#d9f3ff;stroke-width:3;filter:drop-shadow(0 0 7px rgba(83,181,255,.75))}.graph-inspector{min-height:510px}.graph-identity{display:flex;gap:9px;align-items:center;flex-wrap:wrap;margin:13px 0}.graph-muted{font-size:10px;color:#8299ab}.graph-structure-2d{min-height:150px;border:1px solid #1d354b;border-radius:9px;background:#071421;display:grid;place-items:center;overflow:hidden}.graph-structure-2d .structure-image{max-height:180px}.graph-structure-2d .structure-fallback{min-height:150px}.graph-3d-head{margin-top:15px;align-items:flex-end}.graph-viewer{height:245px;margin-top:10px}.graph-viewer .viewer-loading,.graph-viewer .viewer-fallback{font-size:11px}.graph-lookup-controls .btn:disabled{opacity:.55;cursor:wait}
 .graph-lookup{flex-wrap:wrap}@media(max-width:1050px){.graph-workspace{grid-template-columns:1fr}}@media(max-width:720px){.graph-lookup{display:block}.graph-lookup-controls{margin-top:12px;min-width:0}.graph-lookup-controls input{min-width:0;width:100%}.graph-3d-head{display:block}.graph-3d-head .viewer-tools{justify-content:flex-start;margin-top:10px}}
+
+/* =========================================================
+   NEW EXPERIMENT WIZARD STYLES (Multi-Step Overlay)
+   ========================================================= */
+.wizard-overlay{position:fixed;inset:0;z-index:100;background:rgba(4,12,23,.86);backdrop-filter:blur(10px);overflow-y:auto;display:flex;justify-content:center;align-items:flex-start;padding:30px 18px}
+.wizard-shell{width:min(1120px,100%);background:linear-gradient(170deg,#0d1f33 0%,#081524 100%);border:1px solid #1e3a58;border-radius:14px;box-shadow:0 24px 80px rgba(0,0,0,.65);display:flex;flex-direction:column;overflow:hidden;margin:auto}
+.wizard-header{display:flex;align-items:center;justify-content:space-between;padding:18px 26px;border-bottom:1px solid #1a334c;background:#091829}
+.wizard-title-group{display:flex;align-items:center;gap:14px}
+.wizard-brand-badge{background:linear-gradient(135deg,#5eead4,#53b5ff);color:#061321;font-size:10px;font-weight:800;letter-spacing:.1em;padding:5px 9px;border-radius:6px}
+.wizard-header h2{margin:0;font-size:18px;font-weight:700;color:#f0f6fc;letter-spacing:-.02em}
+.wizard-header p{margin:2px 0 0;font-size:11px;color:#859bb0}
+.wizard-close-btn{font-size:18px;color:#889fb4;width:32px;height:32px;border-radius:6px;display:grid;place-items:center}
+.wizard-close-btn:hover{background:#162e46;color:#e7eef7}
+
+/* Stepper Bar */
+.wizard-stepper{display:flex;align-items:center;justify-content:space-between;padding:18px 36px;border-bottom:1px solid #162c42;background:#071422}
+.step-indicator{display:flex;align-items:center;gap:9px;cursor:pointer;opacity:.55;transition:.2s}
+.step-indicator.active{opacity:1}
+.step-num{width:26px;height:26px;border-radius:50%;display:grid;place-items:center;font-size:11px;font-weight:700;background:#152c42;color:#889fb4;border:1px solid #234668}
+.step-indicator.active .step-num{background:linear-gradient(135deg,#5eead4,#3b82f6);color:#061321;border-color:#5eead4;box-shadow:0 0 14px rgba(94,234,212,.35)}
+.step-indicator.done .step-num{background:#10352e;color:#5eead4;border-color:#2a705e}
+.step-label{font-size:12px;font-weight:600;color:#cbd9e8}
+.step-line{flex:1;height:2px;background:#18324a;margin:0 14px}
+.step-line.active{background:linear-gradient(90deg,#5eead4,#3b82f6)}
+
+/* Body & Panes */
+.wizard-body{padding:26px 32px 34px}
+.wizard-pane{display:flex;flex-direction:column;gap:22px}
+.pane-heading h3{margin:0;font-size:18px;color:#f1f7ff;font-weight:700}
+.pane-heading p{margin:4px 0 0;color:#8ba2b8;font-size:12px}
+
+/* Forms */
+.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+.form-group{display:flex;flex-direction:column;gap:6px}
+.form-group.full-width{grid-column:1/-1}
+.form-group label{font-size:11px;font-weight:600;color:#9eb5ca;text-transform:uppercase;letter-spacing:.06em}
+.required{color:#f87171}
+.field-hint{font-size:10px;color:#6d849b}
+.wizard-input,.wizard-textarea,.wizard-select{background:#081524;border:1px solid #203c58;border-radius:8px;padding:10px 12px;color:#e1edf8;font-size:13px;outline:0;transition:.18s}
+.wizard-input:focus,.wizard-textarea:focus,.wizard-select:focus{border-color:#53b5ff;box-shadow:0 0 0 3px rgba(83,181,255,.15)}
+.wizard-textarea{min-height:90px;resize:vertical;line-height:1.5}
+
+/* Step Actions */
+.wizard-actions{display:flex;align-items:center;gap:12px;margin-top:14px;padding-top:18px;border-top:1px solid #162b3f}
+.flex-spacer{flex:1}
+
+/* Step 2: Chemical Picker */
+.search-add-bar{display:flex;gap:10px;align-items:center}
+.search-wrapper{flex:1;position:relative;display:flex;align-items:center}
+.search-icon{position:absolute;left:12px;color:#6b849c;font-size:14px}
+.search-wrapper .wizard-input{padding-left:34px;width:100%}
+.chem-picker-quick{display:flex;align-items:center;gap:10px;flex-wrap:wrap;background:#09192a;border:1px solid #162c40;padding:10px 14px;border-radius:8px}
+.chem-picker-quick small{color:#768fa5;font-size:11px;font-weight:600}
+.quick-tags{display:flex;gap:7px;flex-wrap:wrap}
+.quick-chip{font-size:11px;padding:4px 9px;border-radius:6px;background:#0d2338;border:1px solid #1e4262;color:#b5cde2}
+.quick-chip .dim{color:#688299;font-size:10px;margin-left:3px}
+.section-subhead{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;font-size:13px;font-weight:600;color:#c9d9ea}
+.requirement-badge{font-size:11px;padding:3px 9px;border-radius:99px;font-weight:600}
+.requirement-badge.met{background:#0e362c;color:#67e8b4;border:1px solid #206d57}
+.requirement-badge.unmet{background:#382414;color:#fbbf70;border:1px solid #6b431e}
+.chem-cards-grid{display:grid;grid-template-columns:1fr;gap:12px}
+.chem-selected-card{border:1px solid #1a3550;background:#0a1a2c;border-radius:10px;padding:15px 18px;display:flex;flex-direction:column;gap:12px;transition:.2s}
+.chem-selected-card:hover{border-color:#2a5782}
+.chem-selected-card.catalyst-card{border-color:#226a64;background:linear-gradient(145deg,#0a1d2e,#082424);box-shadow:0 0 18px rgba(94,234,212,.08)}
+.chem-card-header{display:flex;align-items:center;justify-content:space-between}
+.chem-card-ident{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.chem-card-ident h4{margin:0;font-size:14px;font-weight:700;color:#f0f6fc}
+.formula-tag{font-family:Georgia,serif;color:#5eead4;background:#0d2f34;border:1px solid #195250;padding:2px 8px;border-radius:6px;font-size:11px}
+.cas-tag{color:#8299af;font-size:11px}
+.chem-role-badge{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;padding:3px 8px;border-radius:99px;background:#15344f;color:#85c7f8;border:1px solid #285d88}
+.chem-role-badge.cat-role{background:#0d3935;color:#5eead4;border-color:#1c7263}
+.remove-chem-btn{background:transparent;border:0;color:#7e95ab;font-size:16px;cursor:pointer;padding:4px 8px;border-radius:4px}
+.remove-chem-btn:hover{color:#f87171;background:#24181a}
+.chem-card-controls{display:grid;grid-template-columns:1.2fr 1fr;gap:16px}
+.qty-group label,.role-group label{display:block;font-size:10px;text-transform:uppercase;color:#7993a9;font-weight:600;margin-bottom:5px}
+.input-unit-duo{display:flex;gap:6px}
+.input-unit-duo .qty-input{flex:1}
+.input-unit-duo .unit-select{width:75px}
+.catalyst-card-callout{font-size:11px;color:#a5f3fc;background:rgba(6,182,212,.12);border:1px solid rgba(6,182,212,.3);padding:8px 12px;border-radius:6px}
+.empty-state-box{text-align:center;padding:36px;border:1px dashed #1f3d5a;border-radius:10px;color:#778fa4}
+.empty-icon{font-size:28px;display:block;margin-bottom:8px;color:#53b5ff}
+
+/* Step 3: Parameter Configuration */
+.step3-section-title{display:flex;justify-content:space-between;align-items:center;color:#b0c6db;font-size:13px;font-weight:600;margin-bottom:8px}
+.collapsible-chems-container{display:flex;flex-direction:column;gap:14px}
+.chem-param-card{border:1px solid #1a3550;border-radius:10px;background:#09192a;overflow:hidden;transition:.2s}
+.chem-param-card.catalyst-theme{border-color:#20635e;box-shadow:0 0 16px rgba(94,234,212,.06)}
+.param-card-header{display:flex;align-items:center;justify-content:space-between;padding:14px 18px;background:#0b1e32;cursor:pointer;user-select:none;border-bottom:1px solid #152d45}
+.param-card-header:hover{background:#0e243b}
+.header-left{display:flex;align-items:center;gap:10px}
+.collapse-icon{font-size:14px;color:#6f8aa3;transition:transform .2s}
+.chem-param-card.collapsed .collapse-icon{transform:rotate(-90deg)}
+.chem-param-card.collapsed .param-card-body{display:none}
+.header-left h4{margin:0;font-size:13px;color:#edf4fc}
+.chem-role-pill{font-size:9px;text-transform:uppercase;font-weight:700;padding:2px 7px;border-radius:99px;background:#143048;color:#7fc2f5;border:1px solid #234f74}
+.chem-role-pill.cat-pill{background:#0e3630;color:#5eead4;border-color:#1c695b}
+.formula-dim{color:#7993aa;font-size:11px}
+.header-right{display:flex;align-items:center;gap:12px;font-size:11px;color:#9bb2c7}
+.conc-pill{background:#112a40;padding:2px 8px;border-radius:99px;border:1px solid #1f4769;color:#b2d9f7}
+.param-card-body{padding:18px 20px;display:flex;flex-direction:column;gap:20px}
+.sliders-section h5,.props-section h5{margin:0 0 12px;font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:#7892a9;font-weight:700}
+.slider-quad-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.slider-card-box{background:#071422;border:1px solid #172d42;border-radius:8px;padding:12px 14px;display:flex;flex-direction:column;gap:10px}
+.slider-card-box.full-span{grid-column:1/-1}
+.slider-head{display:flex;justify-content:space-between;align-items:center}
+.slider-head label{font-size:11px;font-weight:600;color:#c0d2e2}
+.slider-val-pill{font-size:11px;font-weight:700;background:#12293d;color:#53b5ff;padding:2px 8px;border-radius:6px;border:1px solid #234d70}
+.slider-val-pill.ph-pill{background:#231a30;color:#d8b4fe;border-color:#5b21b6}
+.slider-val-pill.cat-pill{background:#0c302a;color:#5eead4;border-color:#165f50}
+.dual-readout-duo{display:flex;align-items:center;gap:8px;font-size:11px;color:#9db4c8}
+.mini-num{width:56px;background:#091624;border:1px solid #224364;color:#5eead4;font-size:11px;font-weight:700;padding:2px 4px;border-radius:4px;text-align:center}
+.dual-slider-container{position:relative;height:24px;display:flex;align-items:center}
+.dual-track{position:absolute;inset:10px 0;height:4px;background:#162c40;border-radius:2px}
+.dual-range-fill{position:absolute;height:4px;background:linear-gradient(90deg,#5eead4,#3b82f6);border-radius:2px;pointer-events:none}
+.dual-input{position:absolute;inset:0;width:100%;height:100%;-webkit-appearance:none;background:none;pointer-events:none;margin:0}
+.dual-input::-webkit-slider-thumb{pointer-events:auto;-webkit-appearance:none;width:16px;height:16px;border-radius:50%;background:#5eead4;border:2px solid #061321;box-shadow:0 0 6px rgba(0,0,0,.5);cursor:pointer}
+.dual-input::-moz-range-thumb{pointer-events:auto;width:16px;height:16px;border-radius:50%;background:#5eead4;border:2px solid #061321;box-shadow:0 0 6px rgba(0,0,0,.5);cursor:pointer}
+.toggle-label-wrap{display:flex;align-items:center;gap:12px}
+.conc-toggle-group{display:flex;background:#0c1d2e;border:1px solid #1a3650;border-radius:6px;overflow:hidden}
+.toggle-btn{background:transparent;border:0;color:#7993aa;font-size:10px;font-weight:700;padding:3px 8px;cursor:pointer}
+.toggle-btn.active{background:#23527a;color:#e8f4fc}
+.props-fields-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+.prop-field{display:flex;flex-direction:column;gap:5px}
+.prop-field label{font-size:10px;color:#7b94aa;font-weight:600}
+.hazards-wrap{margin-top:12px;display:flex;flex-direction:column;gap:6px}
+.hazards-wrap label{font-size:10px;color:#7b94aa;font-weight:600}
+.hazard-chips{display:flex;gap:7px;flex-wrap:wrap}
+.hazard-chip{background:#091624;border:1px solid #1b354d;color:#95adc2;font-size:11px;padding:4px 10px;border-radius:6px;cursor:pointer;transition:.15s}
+.hazard-chip.selected{background:#3b1f1f;border-color:#b91c1c;color:#fca5a5;font-weight:600}
+
+/* Catalyst Effect Section */
+.catalyst-effect-section{border:1px solid #1a5b54;background:linear-gradient(145deg,#071e22,#06161a);border-radius:9px;padding:15px 18px;display:flex;flex-direction:column;gap:12px}
+.cat-head{display:flex;align-items:center;gap:10px}
+.cat-icon{font-size:18px;color:#5eead4}
+.cat-head strong{color:#5eead4;font-size:13px;display:block}
+.cat-head p{margin:0;font-size:11px;color:#8abcb4}
+.cat-controls-grid{display:grid;grid-template-columns:1.4fr 1.2fr 1fr;gap:14px}
+.cat-control-box{display:flex;flex-direction:column;gap:6px}
+.cat-control-box label{font-size:10px;color:#7ba39d;font-weight:600;text-transform:uppercase}
+
+/* Global Conditions */
+.global-conditions-panel{border:1px solid #1c3854;border-radius:10px;background:#091a2c;padding:18px 22px}
+.global-controls-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:14px}
+.control-box{display:flex;flex-direction:column;gap:6px;background:#061320;border:1px solid #152d43;border-radius:8px;padding:11px 13px}
+.control-box label{font-size:11px;font-weight:600;color:#b1c6d9}
+.slider-val-box{display:flex;align-items:center;gap:4px}
+.num-readout{width:64px;background:#081726;border:1px solid #204161;color:#53b5ff;font-size:12px;font-weight:700;padding:3px 6px;border-radius:4px;text-align:center}
+.simulate-btn{background:linear-gradient(135deg,#10b981,#06b6d4);color:#04151a;font-weight:800;border:0;box-shadow:0 6px 20px rgba(6,182,212,.3)}
+
+/* Simulation Loading Screen */
+.simulation-loading-screen{text-align:center;padding:70px 20px;display:flex;flex-direction:column;align-items:center;gap:16px}
+.molecule-spinner{width:80px;height:80px}
+.spinner-svg{width:100%;height:100%}
+.simulation-loading-screen h3{margin:0;font-size:20px;color:#f0f6fc}
+.simulation-loading-screen p{margin:0;max-width:540px;color:#859bb0;font-size:12px;line-height:1.6}
+.sim-pulse-bar{width:240px;height:4px;background:#142c42;border-radius:2px;overflow:hidden;margin-top:8px}
+.pulse-fill{display:block;height:100%;background:linear-gradient(90deg,#5eead4,#3b82f6);animation:simPulse 1.2s infinite ease-in-out}
+@keyframes simPulse{0%{transform:translateX(-100%)}100%{transform:translateX(100%)}}
+
+/* Step 4: Results Dashboard */
+.results-header-banner{display:flex;align-items:center;justify-content:space-between;padding:18px 22px;border:1px solid #1c3b5a;border-radius:10px;background:linear-gradient(145deg,#0a1d30,#071524);gap:16px}
+.status-pill{font-size:11px;font-weight:700;padding:3px 9px;border-radius:99px;display:inline-block;margin-bottom:6px}
+.status-pill.feasible{background:#0e382d;color:#67e8b4;border:1px solid #1e705b}
+.status-pill.moderate{background:#362615;color:#fbbf70;border:1px solid #6b471c}
+.results-header-banner h3{margin:0;font-size:17px;color:#f0f6fc}
+.chem-equation{margin:6px 0 0;font-size:12px}
+.chem-equation code{color:#5eead4;background:#061421;padding:4px 8px;border-radius:5px;border:1px solid #17344e;font-family:Georgia,serif}
+.results-section{display:flex;flex-direction:column;gap:12px}
+.section-title{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:#53b5ff;display:flex;align-items:center;gap:8px}
+.thermo-cards-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+.thermo-card{background:#081726;border:1px solid #172f48;border-radius:9px;padding:14px;display:flex;flex-direction:column;gap:4px}
+.thermo-label{font-size:10px;color:#7893ab;font-weight:600;text-transform:uppercase}
+.thermo-val{font-size:20px;font-weight:750;letter-spacing:-.02em;color:#e6f1fb}
+.thermo-val.good{color:#67e8b4}
+.thermo-val.warn{color:#fbbf70}
+.thermo-val.exo{color:#53b5ff}
+.thermo-val.cat-boost{color:#5eead4;text-shadow:0 0 10px rgba(94,234,212,.3)}
+.thermo-sub{font-size:10px;color:#6d869c}
+.catalyst-influence-banner{border:1px solid #1e615a;background:linear-gradient(135deg,#061f22,#09272d);border-radius:8px;padding:12px 16px;display:flex;flex-direction:column;gap:6px}
+.cat-influence-badge{color:#5eead4;font-size:10px;font-weight:800;letter-spacing:.08em}
+.cat-influence-content strong{color:#e6f9f6}
+.cat-influence-content p{margin:4px 0 0;color:#92c9c2;font-size:11px}
+
+/* Observables Grid */
+.observables-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+.obs-card{background:#081625;border:1px solid #172d43;border-radius:8px;padding:12px 14px;display:flex;flex-direction:column;gap:5px}
+.obs-tag{font-size:9px;text-transform:uppercase;font-weight:700;color:#53b5ff;letter-spacing:.06em}
+.obs-card b{font-size:12px;color:#e1edf8}
+.obs-card small{font-size:10px;color:#7790a6;line-height:1.4}
+.color-swatch-row{display:flex;align-items:center;gap:8px;margin-top:4px}
+.swatch-item{display:flex;align-items:center;gap:5px}
+.color-dot{width:16px;height:16px;border-radius:50%;border:1px solid #324c65;display:inline-block}
+.arrow-sym{color:#5eead4;font-size:12px}
+.mini-svg-chart{width:100%;height:38px;margin-top:4px}
+
+/* Products & Purity */
+.products-layout{display:grid;grid-template-columns:1fr 240px;gap:14px;align-items:stretch}
+.product-table-panel{padding:14px}
+.highlight-row td{background:rgba(83,181,255,.05)}
+.yield-badge{background:#0e362d;color:#67e8b4;border:1px solid #206d57;font-weight:700;padding:2px 7px;border-radius:6px;font-size:11px}
+.purity-meter-card{background:#081829;border:1px solid #1c3652;border-radius:10px;padding:18px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;gap:10px}
+.purity-title{font-size:11px;font-weight:700;text-transform:uppercase;color:#8ca4bc}
+.purity-circle{width:86px;height:86px;border-radius:50%;border:3px solid #5eead4;box-shadow:0 0 16px rgba(94,234,212,.2);display:flex;flex-direction:column;align-items:center;justify-content:center;background:#061421}
+.purity-number{font-size:22px;font-weight:800;color:#5eead4}
+.purity-label{font-size:8px;text-transform:uppercase;color:#85a0b7;letter-spacing:.05em}
+.purity-meter-card p{margin:0;font-size:10px;color:#6b859c;line-height:1.4}
+
+/* Structure & 3D Viewer */
+.structure-two-col{display:grid;grid-template-columns:1fr 1.15fr;gap:14px}
+.structure-art-box{background:#05111c;border:1px solid #18314a;border-radius:8px;min-height:180px;display:grid;place-items:center;padding:12px;margin:10px 0}
+.structure-art-box svg{max-height:180px;width:auto}
+.code-box{background:#05111c;border:1px solid #15293d;border-radius:6px;padding:8px 10px;margin-bottom:8px}
+.code-box small{display:block;font-size:9px;text-transform:uppercase;color:#6e879e;margin-bottom:3px}
+.code-box code,.code-box span{color:#a9c5db;font-size:11px;line-height:1.4;word-break:break-all}
+.sim-viewer-3d{height:200px;border-radius:8px;margin:10px 0}
+.functional-groups-box{margin:8px 0}
+.functional-groups-box small{display:block;font-size:10px;color:#748fa7;font-weight:600;margin-bottom:5px}
+.fg-tags{display:flex;gap:6px;flex-wrap:wrap}
+.fg-tag{background:#112a40;color:#9ad5fd;border:1px solid #204e76;font-size:10px;padding:2px 7px;border-radius:5px}
+.mini-bond-table{max-height:115px;overflow-y:auto;border:1px solid #142a3e;border-radius:6px}
+
+/* Safety & Notes */
+.safety-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.safety-panel{border-color:#533519}
+.waste-panel{border-color:#184a58}
+.text-amber{color:#fbbf70}
+.text-cyan{color:#5eead4}
+.text-blue{color:#53b5ff}
+.text-green{color:#67e8b4}
+.bullet-list{margin:8px 0;padding-left:18px;color:#cfdeec;font-size:11px;line-height:1.6}
+.ppe-chips-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:10px}
+.ppe-chips-row small{color:#7c95ad;font-size:10px}
+.ppe-chip{background:#231a15;border:1px solid #633f20;color:#fbbf70;font-size:10px;padding:2px 7px;border-radius:5px}
+.theory-practice-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.theory-card,.practice-card{font-size:11px;line-height:1.6}
+.explanation{color:#8ea7bd;margin-top:6px}
+.lab-tips{color:#5eead4;background:rgba(94,234,212,.07);border-left:3px solid #5eead4;padding:6px 9px;border-radius:0 6px 6px 0;margin-top:8px}
+
+/* Step 5: Save & Export */
+.save-cards-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+.action-card{display:flex;flex-direction:column;gap:14px;padding:22px}
+.action-card.primary-action{border-color:#2a6794;background:linear-gradient(145deg,#0e263d,#091b2c)}
+.action-card-head{display:flex;gap:12px;align-items:flex-start}
+.action-icon{width:36px;height:36px;border-radius:8px;background:#15344f;color:#53b5ff;display:grid;place-items:center;font-size:16px;flex-shrink:0}
+.action-card h4{margin:0;font-size:14px;color:#f0f6fc}
+.action-card p{margin:4px 0 0;font-size:11px;color:#7e98ae;line-height:1.4}
+.record-summary-chip{background:#071625;border:1px solid #162f49;border-radius:6px;padding:8px 10px;font-size:11px;display:flex;flex-direction:column;gap:4px;color:#8da6be}
+.record-summary-chip b{color:#d8e7f5}
+.export-buttons-group{display:flex;flex-direction:column;gap:8px}
+.full-width{width:100%}
+
+/* Responsive */
+@media(max-width:960px){
+  .wizard-stepper{padding:14px 18px}
+  .step-label{display:none}
+  .form-grid,.slider-quad-grid,.props-fields-grid,.cat-controls-grid,.global-controls-grid,.thermo-cards-grid,.observables-grid,.structure-two-col,.products-layout,.safety-grid,.theory-practice-grid,.save-cards-grid{grid-template-columns:1fr}
+}
+
+/* Print Styles */
+@media print{
+  body *{visibility:hidden}
+  #wizard-overlay,#wizard-overlay *{visibility:visible}
+  #wizard-overlay{position:static;background:#fff;color:#000;padding:0}
+  .wizard-shell{background:#fff;border:0;box-shadow:none;color:#000}
+  .wizard-header,.wizard-stepper,.wizard-actions{display:none}
+  .panel{background:#fff;border:1px solid #ccc;color:#000}
+  .thermo-val,.chem-equation code{color:#000}
+}
+
