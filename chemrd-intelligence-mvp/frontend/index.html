@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#08111f" />
+    <title>ChemR&D Intelligence</title>
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <div id="app-shell">
+      <aside class="sidebar">
+        <div class="brand"><div class="brand-mark">⌬</div><div><strong>ChemR&D</strong><span>Intelligence platform</span></div></div>
+        <div class="workspace-picker"><span class="live-dot"></span><span>Pilot lab workspace</span><span class="chevron">⌄</span></div>
+        <nav id="main-nav" aria-label="Main navigation">
+          <button class="nav-item active" data-view="overview"><span>◈</span>Overview</button>
+          <button class="nav-item" data-view="search"><span>⌕</span>Universal search</button>
+          <button class="nav-item" data-view="chemicals"><span>⬡</span>Chemical library</button>
+          <button class="nav-item" data-view="experiments"><span>◌</span>Experiments</button>
+          <button class="nav-item" data-view="analytics"><span>⌁</span>Analysis workspace</button>
+          <button class="nav-item" data-view="graph"><span>✣</span>Knowledge graph</button>
+          <button class="nav-item" data-view="assistant"><span>✦</span>Research assistant</button>
+          <button class="nav-item" data-view="ingestion"><span>⇧</span>Data ingestion</button>
+        </nav>
+        <div class="sidebar-bottom"><div class="security-note"><span>●</span><div><b>Provenance guard</b><small>Origins stay separate</small></div></div><div class="user-chip"><div class="avatar">AR</div><div><b>Anika Rao</b><small>Research lead</small></div><span>⋯</span></div></div>
+      </aside>
+      <main class="main">
+        <header class="topbar"><button id="mobile-menu" class="icon-button">☰</button><div class="breadcrumb">Pilot lab <span>/</span> <b id="crumb">Overview</b></div><div class="top-actions"><button class="icon-button" title="Notifications">♧<i></i></button><button class="avatar small">AR</button></div></header>
+        <div id="view" class="view"></div>
+      </main>
+    </div>
+    <div id="toast" class="toast"></div>
+    <script defer src="https://cdn.jsdelivr.net/npm/3dmol@2.5.0/build/3Dmol-min.js"></script>
+    <script defer src="/assets/app.js?v=20260927-3"></script>
+  </body>
+</html>
