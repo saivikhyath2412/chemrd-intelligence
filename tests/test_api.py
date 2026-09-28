@@ -1,4 +1,6 @@
 import os
+import json
+import uuid
 from pathlib import Path
 
 os.environ["DATABASE_URL"] = "sqlite:///./test-chemrd.db"
@@ -12,10 +14,45 @@ from backend.app.main import app, store
 
 client = TestClient(app)
 
+# The API is session-protected. Keep the existing tests focused on application
+# behavior by giving their shared client one disposable authenticated session.
+_test_username = f"test-suite-{uuid.uuid4().hex[:10]}"
+_auth_bootstrap = client.post(
+    "/api/auth/register",
+    json={"username": _test_username, "password": "test-password-123"},
+)
+assert _auth_bootstrap.status_code == 201, _auth_bootstrap.text
+
 
 def teardown_module():
     if Path("test-chemrd.db").exists():
         Path("test-chemrd.db").unlink()
+
+
+def test_auth_register_login_me_logout():
+    auth_client = TestClient(app)
+    username = f"auth-{uuid.uuid4().hex[:10]}"
+    registered = auth_client.post(
+        "/api/auth/register",
+        json={"username": username, "password": "strong-pass-123"},
+    )
+    assert registered.status_code == 201
+    assert registered.json()["user"]["username"] == username
+    assert auth_client.get("/api/auth/me").status_code == 200
+
+    assert auth_client.post("/api/auth/logout").status_code == 200
+    assert auth_client.get("/api/auth/me").status_code == 401
+
+    logged_in = auth_client.post(
+        "/api/auth/login",
+        json={"username": username, "password": "strong-pass-123"},
+    )
+    assert logged_in.status_code == 200
+    assert logged_in.json()["user"]["username"] == username
+    assert auth_client.post(
+        "/api/auth/login",
+        json={"username": username, "password": "wrong-password"},
+    ).status_code == 401
 
 
 def test_health_and_dashboard():
@@ -23,6 +60,26 @@ def test_health_and_dashboard():
     payload = client.get("/api/dashboard").json()
     assert payload["counts"]["chemicals"] >= 5
     assert {item["origin"] for item in payload["origin_counts"]} >= {"measured", "calculated", "ai_estimated"}
+
+
+def test_assistant_history_is_persistent_and_user_scoped():
+    user = client.get("/api/auth/me").json()["user"]
+    created = store.add_assistant_history(
+        user["id"],
+        "What is paclitaxel?",
+        "Paclitaxel answer",
+        [{"label": "Chemical identity record"}],
+        "Groq synthesis active",
+        "groq",
+        "ready",
+    )
+    response = client.get("/api/assistant/history")
+    assert response.status_code == 200
+    assert response.json()["items"][0]["id"] == created["id"]
+    assert response.json()["items"][0]["question"] == "What is paclitaxel?"
+    assert response.json()["items"][0]["citations"][0]["label"] == "Chemical identity record"
+    assert client.delete("/api/assistant/history").json()["ok"] is True
+    assert client.get("/api/assistant/history").json()["items"] == []
 
 
 def test_search_and_chemical_provenance():
@@ -158,6 +215,51 @@ def test_llm_falls_back_between_configured_providers(monkeypatch):
     assert provider == "groq"
 
 
+def test_hindsight_memory_scopes_recall_and_queues_turn(monkeypatch):
+    import backend.app.hindsight_memory as memory_module
+
+    monkeypatch.setenv("HINDSIGHT_ENABLED", "true")
+    monkeypatch.setenv("HINDSIGHT_API_URL", "https://hindsight.example.test")
+    monkeypatch.setenv("HINDSIGHT_API_KEY", "hsk-test")
+    calls = []
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self):
+            return json.dumps(self.payload).encode("utf-8")
+
+    def fake_urlopen(request, timeout):
+        calls.append({"url": request.full_url, "body": json.loads(request.data.decode("utf-8")), "auth": request.headers.get("Authorization")})
+        if request.full_url.endswith("/banks/chemrd-user-123"):
+            return FakeResponse({"bank_id": "chemrd-user-123"})
+        if request.full_url.endswith("/memories/recall"):
+            return FakeResponse({"results": [{"id": "m-1", "text": "The user is evaluating DOPO in resole systems.", "type": "experience"}]})
+        return FakeResponse({"success": True, "async": True})
+
+    monkeypatch.setattr(memory_module, "urlopen", fake_urlopen)
+    adapter = memory_module.HindsightMemory()
+    recalled = adapter.recall("user-123", "What am I evaluating?")
+    retained = adapter.retain_turn("user-123", "What am I evaluating?", "You are evaluating DOPO.", 2)
+
+    assert recalled["status"] == "ok"
+    assert recalled["items"][0]["text"].startswith("The user")
+    assert retained == "queued"
+    assert calls[0]["auth"] == "Bearer hsk-test"
+    assert "tags" not in calls[1]["body"]
+    assert "tags_match" not in calls[1]["body"]
+    assert calls[3]["body"]["items"][0]["document_id"].startswith("assistant-turn-")
+    assert calls[3]["body"]["items"][0]["timestamp"].endswith("+00:00")
+    assert calls[3]["body"]["async"] is False
+
+
 def test_chemical_name_parser_handles_greek_prefix_and_conversation():
     from backend.app.live_research import _entity_candidate, _is_generic_follow_up, _identity_intent
 
@@ -215,6 +317,8 @@ def test_chemical_identity_lookup_can_fall_back_to_chebi(monkeypatch):
     assert error is None
     assert record["source"]["publisher"] == "ChEBI"
     assert record["source"]["metadata"]["chebi_id"] == "CHEBI:15365"
+    assert record["source_url"] == "https://www.ebi.ac.uk/chebi/searchId.do?chebiId=CHEBI:15365"
+    assert "/backend/api/" not in record["source_url"]
     assert record["inchikey"] == "BSYNRYMUTXBXSQ-UHFFFAOYSA-N"
 
 

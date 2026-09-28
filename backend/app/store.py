@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
+import secrets
 import sqlite3
 import uuid
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -60,6 +62,24 @@ CREATE TABLE IF NOT EXISTS library_items (
 );
 CREATE INDEX IF NOT EXISTS library_items_folder_idx ON library_items(folder_id);
 CREATE INDEX IF NOT EXISTS library_items_chemical_idx ON library_items(chemical_id);
+CREATE TABLE IF NOT EXISTS users (
+ id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, password_hash TEXT NOT NULL,
+ created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sessions (
+ token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, created_at TEXT NOT NULL,
+ last_seen_at TEXT NOT NULL, expires_at TEXT NOT NULL,
+ FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS sessions_user_idx ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS sessions_expiry_idx ON sessions(expires_at);
+CREATE TABLE IF NOT EXISTS assistant_history (
+ id TEXT PRIMARY KEY, user_id TEXT NOT NULL, question TEXT NOT NULL, answer TEXT NOT NULL,
+ citations TEXT NOT NULL DEFAULT '[]', assistant_status TEXT NOT NULL DEFAULT '', assistant_provider TEXT,
+ memory_status TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
+ FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS assistant_history_user_idx ON assistant_history(user_id, created_at DESC);
 """
 
 
@@ -82,6 +102,136 @@ class Store:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         return conn
+
+    @staticmethod
+    def _normalize_username(username: str) -> str:
+        return " ".join((username or "").strip().split())
+
+    @staticmethod
+    def _password_hash(password: str, salt: bytes | None = None) -> str:
+        salt = salt or secrets.token_bytes(16)
+        rounds = 310_000
+        digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, rounds)
+        return f"pbkdf2_sha256${rounds}${salt.hex()}${digest.hex()}"
+
+    @staticmethod
+    def _verify_password(password: str, encoded: str) -> bool:
+        try:
+            algorithm, rounds_text, salt_hex, digest_hex = encoded.split("$", 3)
+            if algorithm != "pbkdf2_sha256":
+                return False
+            expected = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), bytes.fromhex(salt_hex), int(rounds_text))
+            return secrets.compare_digest(expected.hex(), digest_hex)
+        except (TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def _session_hash(token: str) -> str:
+        return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+    def create_user(self, username: str, password: str) -> dict[str, Any]:
+        username = self._normalize_username(username)
+        if not username:
+            raise ValueError("Username is required")
+        timestamp = utc_now()
+        user_id = "user-" + uuid.uuid4().hex[:16]
+        try:
+            with closing(self.connect()) as conn:
+                conn.execute(
+                    "INSERT INTO users (id, username, password_hash, created_at, updated_at) VALUES (?,?,?,?,?)",
+                    (user_id, username, self._password_hash(password), timestamp, timestamp),
+                )
+                conn.commit()
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("That username is already registered") from exc
+        return {"id": user_id, "username": username, "created_at": timestamp}
+
+    def authenticate_user(self, username: str, password: str) -> dict[str, Any] | None:
+        username = self._normalize_username(username)
+        rows = self._rows("SELECT id, username, password_hash, created_at FROM users WHERE username = ? COLLATE NOCASE", (username,))
+        if not rows or not self._verify_password(password, rows[0]["password_hash"]):
+            return None
+        row = rows[0]
+        return {"id": row["id"], "username": row["username"], "created_at": row["created_at"]}
+
+    def create_session(self, user_id: str) -> tuple[str, int]:
+        token = secrets.token_urlsafe(48)
+        now = datetime.now(timezone.utc)
+        days = max(1, int(os.getenv("CHEMRD_SESSION_DAYS", "30")))
+        expires = now + timedelta(days=days)
+        with closing(self.connect()) as conn:
+            conn.execute(
+                "INSERT INTO sessions (token_hash, user_id, created_at, last_seen_at, expires_at) VALUES (?,?,?,?,?)",
+                (self._session_hash(token), user_id, now.isoformat(), now.isoformat(), expires.isoformat()),
+            )
+            conn.commit()
+        return token, days * 24 * 60 * 60
+
+    def user_for_session(self, token: str | None) -> dict[str, Any] | None:
+        if not token:
+            return None
+        now = utc_now()
+        with closing(self.connect()) as conn:
+            row = conn.execute(
+                "SELECT u.id, u.username, u.created_at FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires_at > ?",
+                (self._session_hash(token), now),
+            ).fetchone()
+            if not row:
+                return None
+            conn.execute("UPDATE sessions SET last_seen_at = ? WHERE token_hash = ?", (now, self._session_hash(token)))
+            conn.commit()
+            return dict(row)
+
+    def delete_session(self, token: str | None) -> None:
+        if not token:
+            return
+        with closing(self.connect()) as conn:
+            conn.execute("DELETE FROM sessions WHERE token_hash = ?", (self._session_hash(token),))
+            conn.commit()
+
+    def add_assistant_history(
+        self,
+        user_id: str,
+        question: str,
+        answer: str,
+        citations: list[dict[str, Any]] | None = None,
+        assistant_status: str = "",
+        assistant_provider: str | None = None,
+        memory_status: str = "",
+    ) -> dict[str, Any]:
+        history_id = "assistant-history-" + uuid.uuid4().hex[:14]
+        created_at = utc_now()
+        with closing(self.connect()) as conn:
+            conn.execute(
+                "INSERT INTO assistant_history (id, user_id, question, answer, citations, assistant_status, assistant_provider, memory_status, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                (
+                    history_id,
+                    user_id,
+                    question.strip(),
+                    answer,
+                    json.dumps(citations or []),
+                    assistant_status or "",
+                    assistant_provider,
+                    memory_status or "",
+                    created_at,
+                ),
+            )
+            conn.commit()
+        return self.assistant_history(user_id)[0]
+
+    def assistant_history(self, user_id: str) -> list[dict[str, Any]]:
+        rows = self._rows(
+            "SELECT id, question, answer, citations, assistant_status, assistant_provider, memory_status, created_at FROM assistant_history WHERE user_id = ? ORDER BY created_at DESC",
+            (user_id,),
+        )
+        for row in rows:
+            row["citations"] = json.loads(row["citations"] or "[]")
+        return rows
+
+    def clear_assistant_history(self, user_id: str) -> None:
+        with closing(self.connect()) as conn:
+            conn.execute("DELETE FROM assistant_history WHERE user_id = ?", (user_id,))
+            conn.commit()
 
     def initialize(self) -> None:
         with closing(self.connect()) as conn:

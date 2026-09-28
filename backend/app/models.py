@@ -42,3 +42,13 @@ class LibraryItemCreate(BaseModel):
 class SaveLiveChemicalRequest(BaseModel):
     folder_id: str = Field(min_length=1, max_length=160)
     record: dict[str, Any]
+
+
+class AuthRegisterRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=80)
+    password: str = Field(min_length=8, max_length=256)
+
+
+class AuthLoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=80)
+    password: str = Field(min_length=1, max_length=256)

@@ -17,6 +17,8 @@ ChemR&D is a runnable local MVP for chemistry and materials R&D teams. It combin
 - Ingestion connector interfaces for lawful/open/licensed sources; no internet scraping is included.
 - Explicit value origins: `measured`, `literature_extracted`, `calculated`, `model_predicted`, and `ai_estimated`.
 - SQLite for zero-setup local development; PostgreSQL + pgvector is the production-shaped option.
+- Username/password registration and login with salted PBKDF2 password hashes and persistent HttpOnly sessions.
+- Optional Hindsight memory integration for private assistant continuity, with strict per-user memory scoping and no memory facts treated as research citations.
 
 ## Quick start
 
@@ -32,6 +34,12 @@ uvicorn backend.app.main:app --reload
 Open http://127.0.0.1:8000. Interactive API docs are at http://127.0.0.1:8000/docs.
 
 The assistant and Universal Search can query live public sources. Enable “Search documented public APIs live” in Universal Search or “Search live public sources” in the assistant. The API equivalents are `GET /api/research/live?q=...`, `GET /api/search?q=...&live=true`, and `POST /api/assistant` with `{ "question": "...", "live": true }`.
+
+On first launch, register an account in the login screen. The account and session records are stored in the configured database; the password itself is never stored. The browser session is held in an HttpOnly cookie. `CHEMRD_SESSION_DAYS` controls session lifetime and defaults to 30 days. The desktop app keeps its SQLite database under `%LOCALAPPDATA%\\ChemRD`.
+
+### Optional Hindsight memory
+
+The Research Assistant can use Hindsight for private conversation continuity. It recalls user-scoped memories before AI synthesis and queues the completed question/answer for retention afterward. Hindsight memory is deliberately kept separate from live research evidence and is never emitted as a citation. Hindsight is disabled by default; enable it in `.env` with `HINDSIGHT_ENABLED=true`. For Hindsight Cloud, set `HINDSIGHT_API_URL=https://api.hindsight.vectorize.io` and `HINDSIGHT_API_KEY=hsk_...`. A self-hosted Hindsight server can use its local URL instead, such as `http://localhost:8888`; the API key may be left empty when the server does not require authentication. The integration uses Hindsight’s documented `retain` and `recall` endpoints and continues normally if Hindsight is offline.
 
 Live chemical identity cards and assistant identity answers include a **Save to chemical library** action. The folder picker lets a user save the canonical chemical record or any related research item into a chosen folder. Folder contents are separate from the canonical chemical table, so a folder can organize mixed research material without changing chemical identity or provenance.
 
@@ -88,6 +96,12 @@ For the source version, keep `.env` in the repository root beside `pyproject.tom
 | `OPENAI_API_KEY` | empty | OpenAI Responses API key |
 | `GEMINI_API_KEY` | empty | Google Gemini API key |
 | `GROQ_API_KEY` | empty | Groq Cloud API key |
+| `HINDSIGHT_ENABLED` | `false` | Enable optional Research Assistant memory |
+| `HINDSIGHT_API_URL` | empty | Hindsight Cloud or self-hosted API base URL |
+| `HINDSIGHT_API_KEY` | empty | Hindsight Cloud token; never commit it |
+| `HINDSIGHT_BANK_PREFIX` | `chemrd` | Prefix for per-user Hindsight memory banks |
+| `HINDSIGHT_RECALL_BUDGET` | `low` | Hindsight recall depth: `low`, `mid`, or `high` |
+| `HINDSIGHT_RECALL_MAX_TOKENS` | `1200` | Maximum private memory context sent to the assistant |
 | `GROQ_MODEL` | `openai/gpt-oss-120b` | Groq model ID |
 | `CHEMRD_ASSISTANT_MAX_SOURCES` | `7` | Maximum evidence records sent to a model |
 | `CHEMRD_ASSISTANT_ABSTRACT_CHARS` | `900` | Maximum characters per paper abstract in the prompt |

@@ -274,10 +274,15 @@ def chemical_identity_lookup(query: str) -> tuple[dict[str, Any] | None, str | N
     synonyms = list(dict.fromkeys(name for name in names if name))[:20]
     cas_numbers = [value for value in synonyms if re.fullmatch(r"\d{2,7}-\d{2}-\d", value)]
     normalized_id = hashlib.sha1((inchikey or smiles or candidate).encode("utf-8")).hexdigest()[:16]
+    # Keep API endpoints in provenance metadata, but use a human-facing page
+    # for the clickable source link. Otherwise ChEBI opens its raw JSON/API
+    # response (for example, the "Compound Detail API" page) in the browser.
+    chebi_id = (chebi_record or {}).get("chebi_id")
     source_url = (
-        f"{cactus_base}/smiles" if used_provider == "NCI/CADD Cactus"
-        else f"https://www.ebi.ac.uk/chebi/backend/api/public/compound/{(chebi_record or {}).get('chebi_id', '').split(':')[-1]}/" if used_provider == "ChEBI"
-        else f"https://www.ebi.ac.uk/opsin/ws/{encoded}.json"
+        f"https://cactus.nci.nih.gov/chemical/structure/{encoded}/" if used_provider == "NCI/CADD Cactus"
+        else f"https://www.ebi.ac.uk/chebi/searchId.do?chebiId={quote(chebi_id, safe=':')}" if used_provider == "ChEBI" and chebi_id
+        else f"https://www.ebi.ac.uk/opsin/" if used_provider == "OPSIN"
+        else f"https://www.ebi.ac.uk/chebi/"
     )
     # Cactus names are synonyms; only OPSIN's normalized name is promoted to
     # the IUPAC field so a synonym is never silently mislabeled.
@@ -308,7 +313,7 @@ def chemical_identity_lookup(query: str) -> tuple[dict[str, Any] | None, str | N
             "accessed_at": now_iso(),
             "metadata": {
                 "provider": used_provider,
-                "chebi_id": (chebi_record or {}).get("chebi_id"),
+                "chebi_id": chebi_id,
                 "endpoints": endpoints,
                 "descriptor_origin": "calculated locally with RDKit" if calculated else "not calculated",
                 "provider_errors": provider_errors,

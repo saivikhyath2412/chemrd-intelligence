@@ -2,15 +2,16 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 from urllib.error import URLError
 from urllib.parse import quote
-from urllib.request import Request, urlopen
+from urllib.request import Request as UrlRequest, urlopen
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 # Load configuration before importing modules that snapshot timeout/cache
@@ -28,7 +29,8 @@ from .connectors.registry import CONNECTORS, list_connectors
 from .chemistry import structure_svg
 from .live_research import live_research
 from .llm import relevant_evidence, synthesize
-from .models import AssistantRequest, IngestPreviewRequest, LibraryFolderCreate, LibraryItemCreate, SaveLiveChemicalRequest
+from .hindsight_memory import hindsight_memory
+from .models import AuthLoginRequest, AuthRegisterRequest, AssistantRequest, IngestPreviewRequest, LibraryFolderCreate, LibraryItemCreate, SaveLiveChemicalRequest
 from .store import Store
 
 
@@ -37,12 +39,88 @@ if os.getenv("CHEMRD_SEED", "false").lower() not in {"0", "false", "no"}:
     store.seed()
 
 app = FastAPI(title="ChemR&D Intelligence API", version="0.1.0", description="Provenance-aware chemistry R&D MVP")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"], allow_credentials=True)
+
+_PUBLIC_API_PATHS = {
+    "/api/health",
+    "/api/auth/register",
+    "/api/auth/login",
+    "/api/auth/logout",
+    "/api/auth/me",
+}
+
+
+def _session_token(request: Request) -> str | None:
+    authorization = request.headers.get("authorization", "")
+    if authorization.lower().startswith("bearer "):
+        return authorization[7:].strip() or None
+    return request.cookies.get("chemrd_session")
+
+
+def _set_session_cookie(response: JSONResponse, token: str, max_age: int) -> None:
+    response.set_cookie(
+        "chemrd_session",
+        token,
+        max_age=max_age,
+        httponly=True,
+        samesite="lax",
+        secure=os.getenv("CHEMRD_COOKIE_SECURE", "false").lower() in {"1", "true", "yes"},
+        path="/",
+    )
+
+
+@app.middleware("http")
+async def require_login(request: Request, call_next):
+    if request.url.path.startswith("/api/") and request.url.path not in _PUBLIC_API_PATHS:
+        user = store.user_for_session(_session_token(request))
+        if not user:
+            return JSONResponse(status_code=401, content={"detail": "Login required"})
+        request.state.user = user
+    return await call_next(request)
 
 
 @app.get("/api/health")
 def health():
     return {"status": "ok", "service": "chemrd", "database": "sqlite-dev"}
+
+
+@app.post("/api/auth/register", status_code=201)
+def register(request: AuthRegisterRequest):
+    try:
+        user = store.create_user(request.username, request.password)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    token, max_age = store.create_session(user["id"])
+    response = JSONResponse({"user": user}, status_code=201)
+    _set_session_cookie(response, token, max_age)
+    return response
+
+
+@app.post("/api/auth/login")
+def login(request: AuthLoginRequest):
+    user = store.authenticate_user(request.username, request.password)
+    if not user:
+        raise HTTPException(401, "Invalid username or password")
+    token, max_age = store.create_session(user["id"])
+    response = JSONResponse({"user": user})
+    _set_session_cookie(response, token, max_age)
+    return response
+
+
+@app.get("/api/auth/me")
+def auth_me(request: Request):
+    user = store.user_for_session(_session_token(request))
+    if not user:
+        raise HTTPException(401, "Login required")
+    return {"user": user}
+
+
+@app.post("/api/auth/logout")
+def logout(request: Request):
+    store.delete_session(_session_token(request))
+    response = JSONResponse({"ok": True})
+    response.delete_cookie("chemrd_session", path="/")
+    return response
 
 
 @app.get("/api/dashboard")
@@ -130,7 +208,8 @@ def _structure_asset(
     for candidate in candidates:
         url, media_type, source_label = candidate
         try:
-            request = Request(url, headers={"User-Agent": "ChemRD-Intelligence/0.2"})
+            request = UrlRequest(url)
+            request.add_header("User-Agent", "ChemRD-Intelligence/0.2")
             with urlopen(request, timeout=25) as response:
                 payload = response.read()
             # Some public structure services return a MOL file without the
@@ -291,11 +370,49 @@ def ingest_preview(request: IngestPreviewRequest):
     return connector.preview(request.payload)
 
 
+@app.get("/api/assistant/history")
+def assistant_history(request: Request):
+    user = getattr(request.state, "user", None) or {}
+    return {"items": store.assistant_history(user["id"])}
+
+
+@app.delete("/api/assistant/history")
+def clear_assistant_history(request: Request):
+    user = getattr(request.state, "user", None) or {}
+    store.clear_assistant_history(user["id"])
+    return {"ok": True}
+
+
 @app.post("/api/assistant")
-def assistant(request: AssistantRequest):
+def assistant(request: AssistantRequest, http_request: Request):
+    user = getattr(http_request.state, "user", None) or {}
+    memory = hindsight_memory.recall(user.get("id", ""), request.question)
+
+    def remember(answer: str, source_count: int = 0) -> None:
+        if not answer or not user.get("id") or not hindsight_memory.enabled():
+            return
+        threading.Thread(
+            target=hindsight_memory.retain_turn,
+            args=(user["id"], request.question, answer, source_count),
+            daemon=True,
+        ).start()
+
+    def record_history(answer: str, citations: list[dict], assistant_status: str, provider: str | None, memory_status: str) -> None:
+        if user.get("id") and request.question.strip() and answer.strip():
+            store.add_assistant_history(
+                user["id"],
+                request.question,
+                answer,
+                citations,
+                assistant_status,
+                provider,
+                memory_status,
+            )
+
     if request.live:
         live = live_research(request.question)
         evidence = relevant_evidence(request.question, live)
+        evidence["memory_context"] = memory.get("items", [])
         synthesis = synthesize(request.question, evidence)
         if len(synthesis) == 3:
             generated, llm_error, llm_provider = synthesis
@@ -320,8 +437,12 @@ def assistant(request: AssistantRequest):
         else:
             assistant_status = "Relevant cited retrieval"
             assistant_mode = "retrieval_summary"
+        answer = generated or evidence["answer"]
+        memory_status = memory.get("status", hindsight_memory.status())
+        record_history(answer, evidence.get("citations", []), assistant_status, llm_provider, memory_status)
+        remember(answer, len(evidence.get("citations", [])))
         return {
-            "answer": generated or evidence["answer"],
+            "answer": answer,
             "citations": evidence.get("citations", []),
             "results": evidence.get("results", []),
             "providers": live.get("providers", {}),
@@ -330,12 +451,19 @@ def assistant(request: AssistantRequest):
             "assistant_provider": llm_provider,
             "assistant_status": assistant_status,
             "evidence_quality": evidence.get("evidence_quality", "none"),
+            "memory_enabled": hindsight_memory.enabled(),
+            "memory_used": bool(memory.get("items")),
+            "memory_status": memory_status,
             "disclaimer": "General answers come from the configured AI provider when no relevant source was retrieved. Verify scientific, safety, regulatory, and process claims against primary sources before relying on them.",
         }
         # Do not replace a clear live-retrieval response with unrelated seeded
         # demo content when the query is ambiguous or has no live match.
+        answer = live["answer"]
+        memory_status = memory.get("status", hindsight_memory.status())
+        record_history(answer, live.get("citations", []), "Needs a specific subject" if not live.get("providers") else "No live matches", None, memory_status)
+        remember(answer, len(live.get("citations", [])))
         return {
-            "answer": live["answer"],
+            "answer": answer,
             "citations": live.get("citations", []),
             "results": live.get("results", []),
             "providers": live.get("providers", {}),
@@ -343,6 +471,9 @@ def assistant(request: AssistantRequest):
             "assistant_mode": "retrieval_summary",
             "assistant_provider": None,
             "assistant_status": "Needs a specific subject" if not live.get("providers") else "No live matches",
+            "memory_enabled": hindsight_memory.enabled(),
+            "memory_used": bool(memory.get("items")),
+            "memory_status": memory_status,
             "disclaimer": "Live retrieval uses documented public APIs. Verify the cited primary source and applicable license before relying on a claim.",
         }
     chemical = store.chemical(request.chemical_id) if request.chemical_id else None
@@ -360,7 +491,17 @@ def assistant(request: AssistantRequest):
         answer = f"{chemical['name']} is represented with explicit identifiers and {len(chemical['properties'])} provenance-tagged property values. The record keeps measured, extracted, calculated, predicted, and AI-estimated origins separate so you can compare them without silently merging evidence."
     else:
         answer = "I found a useful starting point in the seeded phenolic/resole dataset. Ask about a named chemical, a thermal technique, or a formulation and I will keep the answer tied to the cited records."
-    return {"answer": answer, "citations": citations, "disclaimer": "Demo assistant response; verify against primary records before making a process or safety decision."}
+    remember(answer, len(citations))
+    memory_status = memory.get("status", hindsight_memory.status())
+    record_history(answer, citations, "Workspace evidence", None, memory_status)
+    return {
+        "answer": answer,
+        "citations": citations,
+        "memory_enabled": hindsight_memory.enabled(),
+        "memory_used": bool(memory.get("items")),
+        "memory_status": memory_status,
+        "disclaimer": "Demo assistant response; verify against primary records before making a process or safety decision.",
+    }
 
 
 frontend_dir = BASE_DIR / "frontend"

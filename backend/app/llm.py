@@ -155,9 +155,24 @@ def _compact_records(evidence: dict[str, Any]) -> list[dict[str, Any]]:
     return records
 
 
+def _compact_memory(evidence: dict[str, Any]) -> list[dict[str, Any]]:
+    """Keep private continuity context small and visibly separate from sources."""
+    return [
+        {
+            "memory_id": item.get("id"),
+            "type": item.get("type"),
+            "text": item.get("text"),
+            "context": item.get("context"),
+        }
+        for item in (evidence.get("memory_context", []) or [])[:8]
+        if item.get("text")
+    ]
+
+
 def _prompt_parts(question: str, evidence: dict[str, Any]) -> tuple[str, str]:
     records = _compact_records(evidence)
     evidence_json = json.dumps(records, ensure_ascii=False, separators=(",", ":"))
+    memory_json = json.dumps(_compact_memory(evidence), ensure_ascii=False, separators=(",", ":"))
     instructions = (
         "You are the ChemR&D research assistant and a general chemistry explainer. "
         "Answer general scientific questions from your trained knowledge when the retrieved evidence is empty or unrelated. "
@@ -170,9 +185,10 @@ def _prompt_parts(question: str, evidence: dict[str, Any]) -> tuple[str, str]:
         "A title alone is not evidence for a scientific claim. If the retrieved evidence is weak or unrelated, say that plainly. "
         "Never invent missing values. Separate chemical-provider identity facts from paper findings and label uncertainty. "
         "Cite evidence inline as [S1], [S2], etc., matching source_number. "
+        "Private Hindsight memory is continuity context only, not scientific evidence. Never cite it as [S#], never present it as a paper or measured value, and do not let it override retrieved sources. "
         "Do not give unsafe experimental instructions beyond the evidence."
     )
-    prompt = f"User question:\n{question}\n\nRetrieved evidence:\n{evidence_json}"
+    prompt = f"User question:\n{question}\n\nRetrieved evidence (the only material eligible for [S#] citations):\n{evidence_json}\n\nPrivate Hindsight memory context (not a source and not citation-eligible):\n{memory_json}"
     return instructions, prompt
 
 
