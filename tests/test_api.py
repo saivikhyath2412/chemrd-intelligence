@@ -50,14 +50,85 @@ def test_auth_register_login_me_logout():
 
     logged_in = auth_client.post(
         "/api/auth/login",
-        json={"username": username, "password": "strong-pass-123"},
+        json={"username": username, "password": "strong-pass-123", "remember_me": False},
     )
     assert logged_in.status_code == 200
     assert logged_in.json()["user"]["username"] == username
+    assert "Max-Age=" not in logged_in.headers.get("set-cookie", "")
+    remembered = auth_client.post(
+        "/api/auth/login",
+        json={"username": username, "password": "strong-pass-123", "remember_me": True},
+    )
+    assert remembered.status_code == 200
+    assert "Max-Age=" in remembered.headers.get("set-cookie", "")
     assert auth_client.post(
         "/api/auth/login",
         json={"username": username, "password": "wrong-password"},
     ).status_code == 401
+
+
+def test_user_settings_sessions_password_and_account_lifecycle():
+    auth_client = TestClient(app)
+    username = f"settings-{uuid.uuid4().hex[:10]}"
+    registered = auth_client.post(
+        "/api/auth/register",
+        json={"username": username, "password": "strong-pass-123"},
+    )
+    assert registered.status_code == 201
+    duplicate = auth_client.post(
+        "/api/auth/register",
+        json={"username": username.upper(), "password": "strong-pass-123"},
+    )
+    assert duplicate.status_code == 409
+    assert duplicate.json()["detail"] == "Username already existing"
+
+    bundle = auth_client.get("/api/settings").json()
+    assert bundle["profile"]["username"] == username
+    assert bundle["settings"]["appearance"]["theme"] == "system"
+    assert any(session["current"] for session in bundle["sessions"])
+    second_device = TestClient(app)
+    assert second_device.post(
+        "/api/auth/login", json={"username": username, "password": "strong-pass-123"}
+    ).status_code == 200
+    sessions = auth_client.get("/api/settings").json()["sessions"]
+    non_current = next(session for session in sessions if not session["current"])
+    assert auth_client.delete(f"/api/account/sessions/{non_current['id']}").status_code == 200
+
+    profile = auth_client.put(
+        "/api/settings/profile",
+        json={"full_name": "Researcher One", "age": 24, "research_field": "Materials chemistry", "organization": "Example Lab"},
+    )
+    assert profile.status_code == 200
+    assert profile.json()["profile"]["research_field"] == "Materials chemistry"
+
+    saved = auth_client.put(
+        "/api/settings/preferences",
+        json={"settings": {
+            "appearance": {"theme": "light", "language": "hi", "font_size": "large"},
+            "research": {"interests": "polymers", "preferred_areas": "catalysis", "notifications": False, "research_updates": True},
+            "privacy": {"save_assistant_history": False, "use_hindsight_memory": False},
+        }},
+    )
+    assert saved.status_code == 200
+    assert saved.json()["settings"]["privacy"]["save_assistant_history"] is False
+    assert auth_client.get("/api/settings").json()["settings"]["appearance"]["language"] == "hi"
+    assert auth_client.get("/api/account/export").status_code == 200
+
+    assert auth_client.post(
+        "/api/account/change-password",
+        json={"current_password": "incorrect", "new_password": "better-password-123"},
+    ).status_code == 400
+    changed = auth_client.post(
+        "/api/account/change-password",
+        json={"current_password": "strong-pass-123", "new_password": "better-password-123"},
+    )
+    assert changed.status_code == 200
+    assert auth_client.get("/api/settings").status_code == 200
+
+    assert auth_client.request("DELETE", "/api/account", json={"password": "incorrect"}).status_code == 400
+    deleted = auth_client.request("DELETE", "/api/account", json={"password": "better-password-123"})
+    assert deleted.status_code == 200
+    assert auth_client.get("/api/auth/me").status_code == 401
 
 
 def test_health_and_dashboard():
@@ -94,6 +165,15 @@ def test_search_and_chemical_provenance():
     assert record["properties"]
     assert {prop["origin"] for prop in record["properties"]} == {"measured", "ai_estimated"}
     assert all("source_title" in prop for prop in record["properties"])
+
+
+def test_chemical_detail_includes_separately_labeled_computed_descriptors():
+    record = client.get("/api/chemicals/chem-formaldehyde").json()
+    descriptors = record["computed_descriptors"]
+    assert descriptors["formula"] == "CH2O"
+    assert descriptors["molecular_weight"] > 30
+    assert descriptors["h_bond_acceptors"] == 1
+    assert descriptors["atom_count"] > 0
 
 
 def test_structure_proxy_generates_real_3d_coordinates_locally(monkeypatch):
@@ -154,6 +234,11 @@ def test_assistant_has_citations():
     body = response.json()
     assert body["citations"]
     assert "measured" in body["answer"]
+    history = client.get("/api/assistant/history")
+    assert history.status_code == 200
+    saved_turn = next(item for item in history.json()["items"] if item["question"] == "What does the thermal screen show?")
+    assert saved_turn["answer"] == body["answer"]
+    assert saved_turn["citations"] == body["citations"]
 
 
 def test_live_research_endpoint_keeps_provider_contract(monkeypatch):

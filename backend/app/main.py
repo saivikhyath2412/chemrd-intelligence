@@ -30,7 +30,7 @@ from .chemistry import structure_svg
 from .live_research import live_research
 from .llm import relevant_evidence, synthesize
 from .hindsight_memory import hindsight_memory
-from .models import AuthLoginRequest, AuthRegisterRequest, AssistantRequest, ExperimentCreate, IngestPreviewRequest, LibraryFolderCreate, LibraryItemCreate, SaveLiveChemicalRequest, SimulationRequest, SimulationSaveRequest
+from .models import AuthLoginRequest, AuthRegisterRequest, AssistantRequest, ChangePasswordRequest, DeleteAccountRequest, ExperimentCreate, IngestPreviewRequest, LibraryFolderCreate, LibraryItemCreate, PreferencesUpdateRequest, ProfileUpdateRequest, SaveLiveChemicalRequest, SimulationRequest, SimulationSaveRequest
 from .simulation import simulate_experiment
 from .store import Store
 
@@ -58,16 +58,24 @@ def _session_token(request: Request) -> str | None:
     return request.cookies.get("chemrd_session")
 
 
-def _set_session_cookie(response: JSONResponse, token: str, max_age: int) -> None:
-    response.set_cookie(
-        "chemrd_session",
-        token,
-        max_age=max_age,
+def _set_session_cookie(response: JSONResponse, token: str, max_age: int | None) -> None:
+    cookie_options = dict(
         httponly=True,
         samesite="lax",
         secure=os.getenv("CHEMRD_COOKIE_SECURE", "false").lower() in {"1", "true", "yes"},
         path="/",
     )
+    if max_age is not None:
+        cookie_options["max_age"] = max_age
+    response.set_cookie(
+        "chemrd_session",
+        token,
+        **cookie_options,
+    )
+
+
+def _request_origin(request: Request) -> tuple[str | None, str | None]:
+    return (request.client.host if request.client else None, request.headers.get("user-agent", "")[:500])
 
 
 @app.middleware("http")
@@ -86,23 +94,27 @@ def health():
 
 
 @app.post("/api/auth/register", status_code=201)
-def register(request: AuthRegisterRequest):
+def register(request: AuthRegisterRequest, http_request: Request):
     try:
         user = store.create_user(request.username, request.password)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
-    token, max_age = store.create_session(user["id"])
+    ip_address, user_agent = _request_origin(http_request)
+    token, max_age = store.create_session(user["id"], remember_me=True, ip_address=ip_address, user_agent=user_agent)
+    store.record_login_activity(user["id"], "account_created", ip_address, user_agent)
     response = JSONResponse({"user": user, "session_token": token}, status_code=201)
     _set_session_cookie(response, token, max_age)
     return response
 
 
 @app.post("/api/auth/login")
-def login(request: AuthLoginRequest):
+def login(request: AuthLoginRequest, http_request: Request):
     user = store.authenticate_user(request.username, request.password)
     if not user:
         raise HTTPException(401, "Invalid username or password")
-    token, max_age = store.create_session(user["id"])
+    ip_address, user_agent = _request_origin(http_request)
+    token, max_age = store.create_session(user["id"], remember_me=request.remember_me, ip_address=ip_address, user_agent=user_agent)
+    store.record_login_activity(user["id"], "signed_in", ip_address, user_agent)
     response = JSONResponse({"user": user, "session_token": token})
     _set_session_cookie(response, token, max_age)
     return response
@@ -119,7 +131,78 @@ def auth_me(request: Request):
 
 @app.post("/api/auth/logout")
 def logout(request: Request):
-    store.delete_session(_session_token(request))
+    token = _session_token(request)
+    user = store.user_for_session(token) or {}
+    ip_address, user_agent = _request_origin(request)
+    if user.get("id"):
+        store.record_login_activity(user["id"], "signed_out", ip_address, user_agent)
+    store.delete_session(token)
+    response = JSONResponse({"ok": True})
+    response.delete_cookie("chemrd_session", path="/")
+    return response
+
+
+@app.get("/api/settings")
+def get_settings(request: Request):
+    user = request.state.user
+    bundle = store.get_settings_bundle(user["id"], _session_token(request))
+    if not bundle:
+        raise HTTPException(404, "Account not found")
+    return bundle
+
+
+@app.get("/api/settings/preferences")
+def get_user_preferences(request: Request):
+    return {"settings": store.user_preferences(request.state.user["id"])}
+
+
+@app.put("/api/settings/profile")
+def update_profile(payload: ProfileUpdateRequest, request: Request):
+    picture = payload.profile_picture
+    if picture is not None and picture and not picture.startswith(("data:image/jpeg;base64,", "data:image/png;base64,", "data:image/webp;base64,")):
+        raise HTTPException(422, "Profile picture must be a PNG, JPEG, or WebP image")
+    profile = store.update_profile(request.state.user["id"], payload.model_dump())
+    if profile is None:
+        raise HTTPException(404, "Account not found")
+    return {"profile": profile}
+
+
+@app.put("/api/settings/preferences")
+def update_preferences(payload: PreferencesUpdateRequest, request: Request):
+    settings = store.save_user_settings(request.state.user["id"], payload.settings)
+    return {"settings": settings}
+
+
+@app.post("/api/account/change-password")
+def change_password(payload: ChangePasswordRequest, request: Request):
+    token = _session_token(request)
+    user = request.state.user
+    if not store.change_password(user["id"], payload.current_password, payload.new_password, token):
+        raise HTTPException(400, "Current password is incorrect")
+    return {"ok": True, "message": "Password changed. Other signed-in sessions have been signed out."}
+
+
+@app.delete("/api/account/sessions/{session_id}")
+def revoke_session(session_id: str, request: Request):
+    if not store.revoke_session(request.state.user["id"], session_id, _session_token(request)):
+        raise HTTPException(404, "Session not found or is the current session")
+    return {"ok": True}
+
+
+@app.get("/api/account/export")
+def export_account(request: Request):
+    try:
+        return store.export_user_data(request.state.user["id"])
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.delete("/api/account")
+def delete_account(payload: DeleteAccountRequest, request: Request):
+    user = request.state.user
+    if not store.verify_user_password(user["id"], payload.password):
+        raise HTTPException(400, "Password is incorrect")
+    store.delete_account(user["id"])
     response = JSONResponse({"ok": True})
     response.delete_cookie("chemrd_session", path="/")
     return response
@@ -155,6 +238,7 @@ def chemical(chemical_id: str):
     if not item:
         raise HTTPException(404, "Chemical not found")
     from .chemistry import valid_smiles
+    from .live_research import _rdkit_descriptors
     if not valid_smiles(item.get('smiles')):
         from .live_research import chemical_identity_lookup
         # Earlier builds saved wildcard ontology hits. Recover using the
@@ -167,6 +251,10 @@ def chemical(chemical_id: str):
                 item['structure_svg'] = structure_svg(fixed['smiles'])
                 item['properties'] = [{**p, 'value_text': str(p['value']), 'source_title': fixed['source']['title'], 'method': 'RDKit descriptor' if p['origin'] == 'calculated' else 'Provider identity field'} for p in fixed.get('properties', [])]
                 break
+    # Keep locally calculated structure descriptors separate from the sourced
+    # property ledger. They are available for any saved record with a valid
+    # molecular structure, even when no measurements have been saved yet.
+    item['computed_descriptors'] = _rdkit_descriptors(item.get('smiles'))
     item['structure_2d_url'] = f'/api/chemicals/{chemical_id}/structure-2d'
     item['conformer_3d_url'] = f'/api/chemicals/{chemical_id}/conformer-3d'
     return item
@@ -361,10 +449,13 @@ def clear_assistant_history(request: Request):
 @app.post("/api/assistant")
 def assistant(request: AssistantRequest, http_request: Request):
     user = getattr(http_request.state, "user", None) or {}
-    memory = hindsight_memory.recall(user.get("id", ""), request.question)
+    preferences = store.user_preferences(user["id"]) if user.get("id") else store.default_user_settings()
+    privacy = preferences.get("privacy", {})
+    memory_allowed = bool(privacy.get("use_hindsight_memory", True))
+    memory = hindsight_memory.recall(user.get("id", ""), request.question) if memory_allowed else {"items": [], "status": "disabled"}
 
     def remember(answer: str, source_count: int = 0) -> None:
-        if not answer or not user.get("id") or not hindsight_memory.enabled():
+        if not answer or not user.get("id") or not memory_allowed or not hindsight_memory.enabled():
             return
         threading.Thread(
             target=hindsight_memory.retain_turn,
@@ -373,7 +464,7 @@ def assistant(request: AssistantRequest, http_request: Request):
         ).start()
 
     def record_history(answer: str, citations: list[dict], assistant_status: str, provider: str | None, memory_status: str) -> None:
-        if user.get("id") and request.question.strip() and answer.strip():
+        if user.get("id") and privacy.get("save_assistant_history", True) and request.question.strip() and answer.strip():
             store.add_assistant_history(
                 user["id"],
                 request.question,
@@ -426,9 +517,10 @@ def assistant(request: AssistantRequest, http_request: Request):
             "assistant_provider": llm_provider,
             "assistant_status": assistant_status,
             "evidence_quality": evidence.get("evidence_quality", "none"),
-            "memory_enabled": hindsight_memory.enabled(),
+            "memory_enabled": hindsight_memory.enabled() and memory_allowed,
             "memory_used": bool(memory.get("items")),
             "memory_status": memory_status,
+            "history_saved": bool(privacy.get("save_assistant_history", True)),
             "disclaimer": "General answers come from the configured AI provider when no relevant source was retrieved. Verify scientific, safety, regulatory, and process claims against primary sources before relying on them.",
         }
         # Do not replace a clear live-retrieval response with unrelated seeded
@@ -446,9 +538,10 @@ def assistant(request: AssistantRequest, http_request: Request):
             "assistant_mode": "retrieval_summary",
             "assistant_provider": None,
             "assistant_status": "Needs a specific subject" if not live.get("providers") else "No live matches",
-            "memory_enabled": hindsight_memory.enabled(),
+            "memory_enabled": hindsight_memory.enabled() and memory_allowed,
             "memory_used": bool(memory.get("items")),
             "memory_status": memory_status,
+            "history_saved": bool(privacy.get("save_assistant_history", True)),
             "disclaimer": "Live retrieval uses documented public APIs. Verify the cited primary source and applicable license before relying on a claim.",
         }
     chemical = store.chemical(request.chemical_id) if request.chemical_id else None
@@ -472,9 +565,10 @@ def assistant(request: AssistantRequest, http_request: Request):
     return {
         "answer": answer,
         "citations": citations,
-        "memory_enabled": hindsight_memory.enabled(),
+        "memory_enabled": hindsight_memory.enabled() and memory_allowed,
         "memory_used": bool(memory.get("items")),
         "memory_status": memory_status,
+        "history_saved": bool(privacy.get("save_assistant_history", True)),
         "disclaimer": "Demo assistant response; verify against primary records before making a process or safety decision.",
     }
 

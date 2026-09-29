@@ -175,6 +175,12 @@ def _rdkit_descriptors(smiles: str | None) -> dict[str, Any]:
             "charge": Chem.GetFormalCharge(mol),
             "complexity": round(Descriptors.BertzCT(mol), 5),
             "covalently_bonded_units": len(Chem.GetMolFrags(mol)),
+            "atom_count": mol.GetNumAtoms(),
+            "bond_count": mol.GetNumBonds(),
+            "ring_count": rdMolDescriptors.CalcNumRings(mol),
+            "aromatic_ring_count": rdMolDescriptors.CalcNumAromaticRings(mol),
+            "fraction_csp3": round(rdMolDescriptors.CalcFractionCSP3(mol), 5),
+            "molar_refractivity": round(Crippen.MolMR(mol), 5),
         }
     except Exception:
         return {}

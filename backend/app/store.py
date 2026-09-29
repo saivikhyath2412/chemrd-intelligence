@@ -72,15 +72,27 @@ CREATE INDEX IF NOT EXISTS library_items_folder_idx ON library_items(folder_id);
 CREATE INDEX IF NOT EXISTS library_items_chemical_idx ON library_items(chemical_id);
 CREATE TABLE IF NOT EXISTS users (
  id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, password_hash TEXT NOT NULL,
- created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+ created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+ full_name TEXT NOT NULL DEFAULT '', age INTEGER, profile_picture TEXT,
+ research_field TEXT NOT NULL DEFAULT '', organization TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS sessions (
- token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, created_at TEXT NOT NULL,
- last_seen_at TEXT NOT NULL, expires_at TEXT NOT NULL,
+ token_hash TEXT PRIMARY KEY, session_id TEXT UNIQUE, user_id TEXT NOT NULL, created_at TEXT NOT NULL,
+ last_seen_at TEXT NOT NULL, expires_at TEXT NOT NULL, ip_address TEXT, user_agent TEXT,
  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS sessions_user_idx ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS sessions_expiry_idx ON sessions(expires_at);
+CREATE TABLE IF NOT EXISTS user_settings (
+ user_id TEXT PRIMARY KEY, settings_json TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL,
+ FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS login_activity (
+ id TEXT PRIMARY KEY, user_id TEXT NOT NULL, event TEXT NOT NULL, created_at TEXT NOT NULL,
+ ip_address TEXT, user_agent TEXT,
+ FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS login_activity_user_idx ON login_activity(user_id, created_at DESC);
 CREATE TABLE IF NOT EXISTS assistant_history (
  id TEXT PRIMARY KEY, user_id TEXT NOT NULL, question TEXT NOT NULL, answer TEXT NOT NULL,
  citations TEXT NOT NULL DEFAULT '[]', assistant_status TEXT NOT NULL DEFAULT '', assistant_provider TEXT,
@@ -151,7 +163,7 @@ class Store:
                 )
                 conn.commit()
         except sqlite3.IntegrityError as exc:
-            raise ValueError("That username is already registered") from exc
+            raise ValueError("Username already existing") from exc
         return {"id": user_id, "username": username, "created_at": timestamp}
 
     def authenticate_user(self, username: str, password: str) -> dict[str, Any] | None:
@@ -162,18 +174,25 @@ class Store:
         row = rows[0]
         return {"id": row["id"], "username": row["username"], "created_at": row["created_at"]}
 
-    def create_session(self, user_id: str) -> tuple[str, int]:
+    def create_session(
+        self,
+        user_id: str,
+        remember_me: bool = True,
+        ip_address: str | None = None,
+        user_agent: str | None = None,
+    ) -> tuple[str, int | None]:
         token = secrets.token_urlsafe(48)
         now = datetime.now(timezone.utc)
         days = max(1, int(os.getenv("CHEMRD_SESSION_DAYS", "30")))
-        expires = now + timedelta(days=days)
+        expires = now + (timedelta(days=days) if remember_me else timedelta(hours=12))
+        session_id = "session-" + uuid.uuid4().hex[:20]
         with closing(self.connect()) as conn:
             conn.execute(
-                "INSERT INTO sessions (token_hash, user_id, created_at, last_seen_at, expires_at) VALUES (?,?,?,?,?)",
-                (self._session_hash(token), user_id, now.isoformat(), now.isoformat(), expires.isoformat()),
+                "INSERT INTO sessions (token_hash, session_id, user_id, created_at, last_seen_at, expires_at, ip_address, user_agent) VALUES (?,?,?,?,?,?,?,?)",
+                (self._session_hash(token), session_id, user_id, now.isoformat(), now.isoformat(), expires.isoformat(), ip_address, user_agent),
             )
             conn.commit()
-        return token, days * 24 * 60 * 60
+        return token, days * 24 * 60 * 60 if remember_me else None
 
     def user_for_session(self, token: str | None) -> dict[str, Any] | None:
         if not token:
@@ -181,7 +200,7 @@ class Store:
         now = utc_now()
         with closing(self.connect()) as conn:
             row = conn.execute(
-                "SELECT u.id, u.username, u.created_at FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires_at > ?",
+                "SELECT u.id, u.username, u.created_at, u.full_name, u.age, u.profile_picture, u.research_field, u.organization FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires_at > ?",
                 (self._session_hash(token), now),
             ).fetchone()
             if not row:
@@ -196,6 +215,168 @@ class Store:
         with closing(self.connect()) as conn:
             conn.execute("DELETE FROM sessions WHERE token_hash = ?", (self._session_hash(token),))
             conn.commit()
+
+    @staticmethod
+    def default_user_settings() -> dict[str, Any]:
+        return {
+            "appearance": {"theme": "system", "language": "en", "font_size": "medium"},
+            "research": {"interests": "", "preferred_areas": "", "notifications": True, "research_updates": True},
+            "privacy": {"save_assistant_history": True, "use_hindsight_memory": True, "profile_visibility": "private"},
+        }
+
+    def get_settings_bundle(self, user_id: str, current_token: str | None = None) -> dict[str, Any] | None:
+        defaults = self.default_user_settings()
+        with closing(self.connect()) as conn:
+            user = conn.execute(
+                "SELECT id, username, full_name, age, profile_picture, research_field, organization, created_at FROM users WHERE id = ?",
+                (user_id,),
+            ).fetchone()
+            if not user:
+                return None
+            settings_row = conn.execute("SELECT settings_json FROM user_settings WHERE user_id = ?", (user_id,)).fetchone()
+            if settings_row:
+                try:
+                    saved = json.loads(settings_row["settings_json"] or "{}")
+                except (TypeError, ValueError):
+                    saved = {}
+                if not isinstance(saved, dict):
+                    saved = {}
+                for section in defaults:
+                    if isinstance(saved.get(section), dict):
+                        defaults[section].update(saved[section])
+            sessions = conn.execute(
+                "SELECT session_id, created_at, last_seen_at, expires_at, ip_address, user_agent, token_hash FROM sessions WHERE user_id = ? AND expires_at > ? ORDER BY last_seen_at DESC",
+                (user_id, utc_now()),
+            ).fetchall()
+            activity = conn.execute(
+                "SELECT event, created_at, ip_address, user_agent FROM login_activity WHERE user_id = ? ORDER BY created_at DESC LIMIT 25",
+                (user_id,),
+            ).fetchall()
+        profile = dict(user)
+        profile.pop("id", None)
+        return {
+            "profile": profile,
+            "settings": defaults,
+            "sessions": [
+                {
+                    "id": row["session_id"], "created_at": row["created_at"], "last_seen_at": row["last_seen_at"],
+                    "expires_at": row["expires_at"], "ip_address": row["ip_address"], "user_agent": row["user_agent"],
+                    "current": bool(current_token and row["token_hash"] == self._session_hash(current_token)),
+                }
+                for row in sessions
+            ],
+            "activity": [dict(row) for row in activity],
+        }
+
+    def update_profile(self, user_id: str, values: dict[str, Any]) -> dict[str, Any] | None:
+        now = utc_now()
+        fields = ("full_name", "age", "profile_picture", "research_field", "organization")
+        with closing(self.connect()) as conn:
+            conn.execute(
+                "UPDATE users SET full_name = ?, age = ?, profile_picture = ?, research_field = ?, organization = ?, updated_at = ? WHERE id = ?",
+                (*(values.get(key) for key in fields), now, user_id),
+            )
+            conn.commit()
+        bundle = self.get_settings_bundle(user_id)
+        return bundle["profile"] if bundle else None
+
+    def save_user_settings(self, user_id: str, submitted: dict[str, Any]) -> dict[str, Any]:
+        defaults = self.default_user_settings()
+        clean: dict[str, Any] = {}
+        allowed = {
+            "appearance": {"theme": {"dark", "light", "system"}, "language": {"en", "hi", "es", "fr", "de"}, "font_size": {"small", "medium", "large"}},
+            "research": {"interests": None, "preferred_areas": None, "notifications": None, "research_updates": None},
+            "privacy": {"save_assistant_history": None, "use_hindsight_memory": None, "profile_visibility": {"private", "workspace"}},
+        }
+        for section, fields in allowed.items():
+            supplied = submitted.get(section) if isinstance(submitted.get(section), dict) else {}
+            clean[section] = dict(defaults[section])
+            for key, valid in fields.items():
+                if key not in supplied:
+                    continue
+                value = supplied[key]
+                if valid is not None and (not isinstance(value, str) or value not in valid):
+                    continue
+                if valid is None and key in {"notifications", "research_updates", "save_assistant_history", "use_hindsight_memory"} and not isinstance(value, bool):
+                    continue
+                if key in {"interests", "preferred_areas"} and not isinstance(value, str):
+                    continue
+                clean[section][key] = value.strip()[:2000] if key in {"interests", "preferred_areas"} else value
+        with closing(self.connect()) as conn:
+            conn.execute(
+                "INSERT INTO user_settings (user_id, settings_json, updated_at) VALUES (?,?,?) ON CONFLICT(user_id) DO UPDATE SET settings_json = excluded.settings_json, updated_at = excluded.updated_at",
+                (user_id, json.dumps(clean), utc_now()),
+            )
+            conn.commit()
+        return clean
+
+    def user_preferences(self, user_id: str) -> dict[str, Any]:
+        bundle = self.get_settings_bundle(user_id)
+        return bundle["settings"] if bundle else self.default_user_settings()
+
+    def record_login_activity(self, user_id: str, event: str, ip_address: str | None = None, user_agent: str | None = None) -> None:
+        with closing(self.connect()) as conn:
+            conn.execute(
+                "INSERT INTO login_activity (id, user_id, event, created_at, ip_address, user_agent) VALUES (?,?,?,?,?,?)",
+                ("activity-" + uuid.uuid4().hex[:20], user_id, event[:80], utc_now(), ip_address, (user_agent or "")[:500]),
+            )
+            conn.commit()
+
+    def revoke_session(self, user_id: str, session_id: str, current_token: str | None = None) -> bool:
+        with closing(self.connect()) as conn:
+            row = conn.execute("SELECT token_hash FROM sessions WHERE session_id = ? AND user_id = ?", (session_id, user_id)).fetchone()
+            if not row or (current_token and row["token_hash"] == self._session_hash(current_token)):
+                return False
+            conn.execute("DELETE FROM sessions WHERE session_id = ? AND user_id = ?", (session_id, user_id))
+            conn.commit()
+        self.record_login_activity(user_id, "session_revoked")
+        return True
+
+    def change_password(self, user_id: str, current_password: str, new_password: str, current_token: str | None) -> bool:
+        with closing(self.connect()) as conn:
+            row = conn.execute("SELECT password_hash FROM users WHERE id = ?", (user_id,)).fetchone()
+            if not row or not self._verify_password(current_password, row["password_hash"]):
+                return False
+            conn.execute("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?", (self._password_hash(new_password), utc_now(), user_id))
+            if current_token:
+                conn.execute("DELETE FROM sessions WHERE user_id = ? AND token_hash != ?", (user_id, self._session_hash(current_token)))
+            else:
+                conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+            conn.commit()
+        self.record_login_activity(user_id, "password_changed")
+        return True
+
+    def verify_user_password(self, user_id: str, password: str) -> bool:
+        rows = self._rows("SELECT password_hash FROM users WHERE id = ?", (user_id,))
+        return bool(rows and self._verify_password(password, rows[0]["password_hash"]))
+
+    def export_user_data(self, user_id: str) -> dict[str, Any]:
+        bundle = self.get_settings_bundle(user_id)
+        if not bundle:
+            raise ValueError("Account not found")
+        with closing(self.connect()) as conn:
+            simulations = [dict(row) for row in conn.execute("SELECT name, objective, experiment_type, input_data, result_data, status, created_at, updated_at FROM simulations WHERE user_id = ? ORDER BY created_at DESC", (user_id,)).fetchall()]
+        for row in simulations:
+            try:
+                row["input_data"] = json.loads(row["input_data"] or "{}")
+            except (TypeError, ValueError):
+                row["input_data"] = {}
+            try:
+                row["result_data"] = json.loads(row["result_data"] or "{}")
+            except (TypeError, ValueError):
+                row["result_data"] = {}
+        bundle["assistant_history"] = self.assistant_history(user_id)
+        bundle["simulations"] = simulations
+        bundle["exported_at"] = utc_now()
+        return bundle
+
+    def delete_account(self, user_id: str) -> bool:
+        with closing(self.connect()) as conn:
+            conn.execute("DELETE FROM simulations WHERE user_id = ?", (user_id,))
+            conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+            deleted = conn.execute("SELECT changes()").fetchone()[0] > 0
+            conn.commit()
+        return deleted
 
     def add_assistant_history(
         self,
@@ -244,6 +425,23 @@ class Store:
     def initialize(self) -> None:
         with closing(self.connect()) as conn:
             conn.executescript(SCHEMA)
+            migrations = {
+                "users": {
+                    "full_name": "TEXT NOT NULL DEFAULT ''", "age": "INTEGER", "profile_picture": "TEXT",
+                    "research_field": "TEXT NOT NULL DEFAULT ''", "organization": "TEXT NOT NULL DEFAULT ''",
+                },
+                "sessions": {
+                    "session_id": "TEXT", "ip_address": "TEXT", "user_agent": "TEXT",
+                },
+            }
+            for table, columns in migrations.items():
+                present = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+                for column, definition in columns.items():
+                    if column not in present:
+                        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            for row in conn.execute("SELECT token_hash FROM sessions WHERE session_id IS NULL"):
+                conn.execute("UPDATE sessions SET session_id = ? WHERE token_hash = ?", ("session-" + uuid.uuid4().hex[:20], row["token_hash"]))
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS sessions_session_id_idx ON sessions(session_id)")
             try:
                 conn.execute("ALTER TABLE experiments ADD COLUMN experiment_type TEXT DEFAULT 'Custom'")
             except sqlite3.OperationalError:

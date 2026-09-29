@@ -5,9 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#08111f" />
     <title>ChemR&D Intelligence</title>
-    <link rel="stylesheet" href="/assets/styles.css?v=20260929-verified-structures-2" />
+    <link rel="stylesheet" href="/assets/styles.css?v=20260929-account-settings-1" />
   </head>
-  <body>
+  <body class="auth-checking">
+    <div id="startup-screen" role="status" aria-live="polite"><div class="startup-brand"><span class="brand-mark">⌬</span><div><strong>ChemR&amp;D</strong><small>Intelligence platform</small></div></div><div class="startup-progress"><span class="spinner" aria-hidden="true"></span><span>Opening your secure workspace…</span></div></div>
     <div id="app-shell">
       <aside class="sidebar">
         <div class="brand"><div class="brand-mark">⌬</div><div><strong>ChemR&D</strong><span>Intelligence platform</span></div></div>
@@ -21,6 +22,7 @@
           <button class="nav-item" data-view="graph"><span>✣</span>Knowledge graph</button>
           <button class="nav-item" data-view="assistant"><span>✦</span>Research assistant</button>
           <button class="nav-item" data-view="ingestion"><span>⇧</span>Data ingestion</button>
+          <button class="nav-item" data-view="settings"><span>⚙</span>Settings</button>
         </nav>
         <div class="sidebar-bottom"><div class="security-note"><span>●</span><div><b>Provenance guard</b><small>Origins stay separate</small></div></div><button class="user-chip" onclick="logoutApp()" title="Sign out"><div class="avatar">AR</div><div><b>Anika Rao</b><small>Research lead</small></div><span>↪</span></button></div>
       </aside>
@@ -32,7 +34,7 @@
     <div id="toast" class="toast"></div>
     <script defer src="/assets/3Dmol-min.js"></script>
     <script defer src="/assets/structure-viewer.js?v=20260929-verified-structures-2"></script>
-    <script defer src="/assets/app.js?v=20260929-verified-structures-2"></script>
+    <script defer src="/assets/app.js?v=20260929-account-settings-1"></script>
     <script defer src="/assets/wizard.js?v=20260929-verified-structures-2"></script>
   </body>
 </html>

@@ -52,6 +52,28 @@ class AuthRegisterRequest(BaseModel):
 class AuthLoginRequest(BaseModel):
     username: str = Field(min_length=1, max_length=80)
     password: str = Field(min_length=1, max_length=256)
+    remember_me: bool = False
+
+
+class ProfileUpdateRequest(BaseModel):
+    full_name: str = Field(default="", max_length=120)
+    age: int | None = Field(default=None, ge=13, le=120)
+    profile_picture: str | None = Field(default=None, max_length=900_000)
+    research_field: str = Field(default="", max_length=160)
+    organization: str = Field(default="", max_length=200)
+
+
+class PreferencesUpdateRequest(BaseModel):
+    settings: dict[str, Any]
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=256)
+    new_password: str = Field(min_length=8, max_length=256)
+
+
+class DeleteAccountRequest(BaseModel):
+    password: str = Field(min_length=1, max_length=256)
 
 
 class ChemicalParam(BaseModel):
