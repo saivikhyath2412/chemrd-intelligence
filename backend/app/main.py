@@ -10,7 +10,6 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
@@ -28,7 +27,7 @@ for _dotenv_path in _dotenv_paths:
 from .connectors.registry import CONNECTORS, list_connectors
 from .chemistry import structure_svg
 from .live_research import live_research
-from .llm import relevant_evidence, synthesize
+from .llm import conversational_reply, relevant_evidence, should_retrieve_sources, synthesize
 from .hindsight_memory import hindsight_memory
 from .models import AuthLoginRequest, AuthRegisterRequest, AssistantRequest, ChangePasswordRequest, DeleteAccountRequest, ExperimentCreate, IngestPreviewRequest, LibraryFolderCreate, LibraryItemCreate, PreferencesUpdateRequest, ProfileUpdateRequest, SaveLiveChemicalRequest, SimulationRequest, SimulationSaveRequest
 from .simulation import simulate_experiment
@@ -40,7 +39,6 @@ if os.getenv("CHEMRD_SEED", "false").lower() not in {"0", "false", "no"}:
     store.seed()
 
 app = FastAPI(title="ChemR&D Intelligence API", version="0.1.0", description="Provenance-aware chemistry R&D MVP")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"], allow_credentials=True)
 
 _PUBLIC_API_PATHS = {
     "/api/health",
@@ -451,8 +449,11 @@ def assistant(request: AssistantRequest, http_request: Request):
     user = getattr(http_request.state, "user", None) or {}
     preferences = store.user_preferences(user["id"]) if user.get("id") else store.default_user_settings()
     privacy = preferences.get("privacy", {})
+    social_reply = conversational_reply(request.question)
     memory_allowed = bool(privacy.get("use_hindsight_memory", True))
-    memory = hindsight_memory.recall(user.get("id", ""), request.question) if memory_allowed else {"items": [], "status": "disabled"}
+    memory = hindsight_memory.recall(user.get("id", ""), request.question) if memory_allowed and not social_reply else {"items": [], "status": hindsight_memory.status() if memory_allowed else "disabled"}
+    history_allowed = bool(privacy.get("save_assistant_history", True))
+    local_history = store.assistant_memory_context(user.get("id", ""), request.question) if history_allowed and not social_reply else []
 
     def remember(answer: str, source_count: int = 0) -> None:
         if not answer or not user.get("id") or not memory_allowed or not hindsight_memory.enabled():
@@ -475,22 +476,54 @@ def assistant(request: AssistantRequest, http_request: Request):
                 memory_status,
             )
 
+    if social_reply:
+        memory_status = memory.get("status", hindsight_memory.status())
+        record_history(social_reply, [], "Conversation", None, memory_status)
+        return {
+            "answer": social_reply,
+            "citations": [],
+            "results": [],
+            "providers": {},
+            "retrieved_at": None,
+            "assistant_mode": "conversation",
+            "assistant_provider": None,
+            "assistant_status": "Conversation",
+            "evidence_quality": "none",
+            "memory_enabled": hindsight_memory.enabled() and memory_allowed,
+            "memory_used": False,
+            "memory_status": memory_status,
+            "history_saved": bool(privacy.get("save_assistant_history", True)),
+        }
+
     if request.live:
-        live = live_research(request.question)
+        source_search_requested = should_retrieve_sources(request.question)
+        live = live_research(request.question) if source_search_requested else {
+            "query": request.question,
+            "results": [],
+            "citations": [],
+            "answer": "",
+            "providers": {},
+            "retrieved_at": None,
+        }
         evidence = relevant_evidence(request.question, live)
-        evidence["memory_context"] = memory.get("items", [])
+        # Saved local turns preserve continuity even when optional Hindsight
+        # is disabled or temporarily unavailable.
+        evidence["memory_context"] = local_history[:4] + (memory.get("items", []) or [])[:4]
         synthesis = synthesize(request.question, evidence)
         if len(synthesis) == 3:
             generated, llm_error, llm_provider = synthesis
         else:  # compatibility with lightweight test doubles and older integrations
             generated, llm_error = synthesis
             llm_provider = None
-        if not live.get("providers") and not live.get("results"):
-            assistant_status = "Needs a specific subject"
-            assistant_mode = "retrieval_summary"
-        elif generated:
+        if generated:
             assistant_status = f"{llm_provider.title() if llm_provider else 'AI'} synthesis active"
             assistant_mode = "llm_synthesis"
+        elif not source_search_requested:
+            assistant_status = "AI providers unavailable"
+            assistant_mode = "retrieval_summary"
+        elif not live.get("providers") and not live.get("results"):
+            assistant_status = "Needs a specific subject"
+            assistant_mode = "retrieval_summary"
         elif llm_error and "RateLimitError" in llm_error:
             assistant_status = "AI providers rate-limited; showing relevant retrieval"
             assistant_mode = "retrieval_summary"
@@ -522,27 +555,6 @@ def assistant(request: AssistantRequest, http_request: Request):
             "memory_status": memory_status,
             "history_saved": bool(privacy.get("save_assistant_history", True)),
             "disclaimer": "General answers come from the configured AI provider when no relevant source was retrieved. Verify scientific, safety, regulatory, and process claims against primary sources before relying on them.",
-        }
-        # Do not replace a clear live-retrieval response with unrelated seeded
-        # demo content when the query is ambiguous or has no live match.
-        answer = live["answer"]
-        memory_status = memory.get("status", hindsight_memory.status())
-        record_history(answer, live.get("citations", []), "Needs a specific subject" if not live.get("providers") else "No live matches", None, memory_status)
-        remember(answer, len(live.get("citations", [])))
-        return {
-            "answer": answer,
-            "citations": live.get("citations", []),
-            "results": live.get("results", []),
-            "providers": live.get("providers", {}),
-            "retrieved_at": live.get("retrieved_at"),
-            "assistant_mode": "retrieval_summary",
-            "assistant_provider": None,
-            "assistant_status": "Needs a specific subject" if not live.get("providers") else "No live matches",
-            "memory_enabled": hindsight_memory.enabled() and memory_allowed,
-            "memory_used": bool(memory.get("items")),
-            "memory_status": memory_status,
-            "history_saved": bool(privacy.get("save_assistant_history", True)),
-            "disclaimer": "Live retrieval uses documented public APIs. Verify the cited primary source and applicable license before relying on a claim.",
         }
     chemical = store.chemical(request.chemical_id) if request.chemical_id else None
     q = request.question.lower()

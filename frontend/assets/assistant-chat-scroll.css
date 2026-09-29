@@ -1,0 +1,104 @@
+/* Keep scrolling inside the Research Assistant panes instead of the app window. */
+body.assistant-chat-open {
+  position: fixed;
+  inset: 0 0 auto;
+  width: 100%;
+  height: calc(100vh / var(--assistant-ui-scale, 1));
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+body.assistant-chat-open #app-shell {
+  height: calc(100vh / var(--assistant-ui-scale, 1));
+  min-height: 0;
+  overflow: hidden;
+}
+
+body.assistant-chat-open .main {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh / var(--assistant-ui-scale, 1));
+  min-height: 0;
+  overflow: hidden;
+}
+
+body.assistant-chat-open .topbar {
+  box-sizing: border-box;
+  flex: 0 0 64px;
+  position: relative;
+}
+
+body.assistant-chat-open .view {
+  box-sizing: border-box;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  width: 100%;
+  height: calc((100vh / var(--assistant-ui-scale, 1)) - 64px);
+  min-height: 0;
+  margin: 0 auto;
+  overflow: hidden;
+  padding: 24px 38px 22px;
+}
+
+body.assistant-chat-open .page-heading {
+  flex: 0 0 auto;
+  margin-bottom: 20px;
+}
+
+body.assistant-chat-open .assistant-layout {
+  align-items: stretch;
+  flex: 1 1 auto;
+  grid-template-columns: minmax(0, 1fr) 290px;
+  grid-template-rows: minmax(0, 1fr);
+  min-height: 0;
+  overflow: hidden;
+}
+
+body.assistant-chat-open .chat-window {
+  box-sizing: border-box;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+body.assistant-chat-open .chat-messages {
+  box-sizing: border-box;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+body.assistant-chat-open .chat-input {
+  flex: 0 0 auto;
+}
+
+body.assistant-chat-open .assistant-layout > .panel:not(.chat-window) {
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+@media (max-width: 1050px) {
+  body.assistant-chat-open .view {
+    padding: 20px 24px;
+  }
+
+  body.assistant-chat-open .assistant-layout {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1.2fr) minmax(0, 0.8fr);
+  }
+}
+
+@media (max-width: 720px) {
+  body.assistant-chat-open .view {
+    padding: 16px 15px;
+  }
+}

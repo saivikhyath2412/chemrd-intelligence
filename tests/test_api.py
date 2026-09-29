@@ -138,6 +138,12 @@ def test_health_and_dashboard():
     assert {item["origin"] for item in payload["origin_counts"]} >= {"measured", "calculated", "ai_estimated"}
 
 
+def test_api_does_not_grant_cross_origin_access_by_default():
+    response = client.get("/api/health", headers={"Origin": "https://untrusted.example"})
+    assert response.status_code == 200
+    assert "access-control-allow-origin" not in response.headers
+
+
 def test_assistant_history_is_persistent_and_user_scoped():
     user = client.get("/api/auth/me").json()["user"]
     created = store.add_assistant_history(
@@ -156,6 +162,74 @@ def test_assistant_history_is_persistent_and_user_scoped():
     assert response.json()["items"][0]["citations"][0]["label"] == "Chemical identity record"
     assert client.delete("/api/assistant/history").json()["ok"] is True
     assert client.get("/api/assistant/history").json()["items"] == []
+
+
+def test_assistant_memory_context_is_scoped_dated_and_redacts_credentials():
+    user_id = client.get("/api/auth/me").json()["user"]["id"]
+    other = store.create_user(f"memory-scope-{uuid.uuid4().hex[:8]}", "test-password-123")
+    store.clear_assistant_history(user_id)
+    try:
+        store.add_assistant_history(
+            user_id,
+            "I am researching paclitaxel.\nHINDSIGHT_API_KEY=hsk_private-test-secret-value",
+            "We discussed its molecular properties and solubility.",
+        )
+        store.add_assistant_history(other["id"], "I am researching DOPO.", "We discussed flame-retardant formulations.")
+
+        history = store.assistant_history(user_id)
+        context = store.assistant_memory_context(user_id, "What chemical was I researching earlier?")
+
+        assert "hsk_private-test-secret-value" not in history[0]["question"]
+        assert "[REDACTED]" in history[0]["question"]
+        assert len(context) == 1
+        assert "paclitaxel" in context[0]["text"].lower()
+        assert "DOPO" not in context[0]["text"]
+        assert context[0]["timestamp"]
+    finally:
+        store.clear_assistant_history(user_id)
+        store.delete_account(other["id"])
+
+
+def test_assistant_prompt_uses_memory_honestly_and_keeps_dates():
+    import backend.app.llm as llm
+
+    instructions, prompt = llm._prompt_parts(
+        "What did I decide earlier?",
+        {"memory_context": [{"id": "turn-1", "text": "Chose a 25 C test.", "timestamp": "2026-09-20T12:00:00+00:00"}]},
+    )
+
+    assert "Never invent a remembered compound, value, condition, result, decision, or date" in instructions
+    assert "I don't have a record of that" in instructions
+    assert "ask which is correct" in instructions
+    assert "2026-09-20T12:00:00+00:00" in prompt
+    assert "not a source and not citation-eligible" in prompt
+
+
+def test_assistant_synthesis_receives_saved_history_when_hindsight_is_offline(monkeypatch):
+    user_id = client.get("/api/auth/me").json()["user"]["id"]
+    store.clear_assistant_history(user_id)
+    store.add_assistant_history(user_id, "I am evaluating DOPO in resole systems.", "We planned a 25 C solubility screen.")
+    received_context = []
+
+    monkeypatch.setattr(main_module.hindsight_memory, "recall", lambda *_: {"items": [], "status": "unavailable"})
+    monkeypatch.setattr(main_module.hindsight_memory, "enabled", lambda: False)
+    monkeypatch.setattr(main_module, "live_research", lambda query: {
+        "query": query, "results": [], "citations": [], "answer": "No relevant live sources.",
+        "providers": {"OpenAlex": {"status": "ok"}},
+    })
+
+    def fake_synthesize(question, evidence):
+        received_context.extend(evidence.get("memory_context", []))
+        return "The saved context indicates DOPO and a 25 C screen.", None, "openai"
+
+    monkeypatch.setattr(main_module, "synthesize", fake_synthesize)
+    try:
+        response = client.post("/api/assistant", json={"question": "What did we decide earlier?", "live": True})
+        assert response.status_code == 200
+        assert any("DOPO" in item["text"] for item in received_context)
+        assert any("25 C" in item["text"] for item in received_context)
+    finally:
+        store.clear_assistant_history(user_id)
 
 
 def test_search_and_chemical_provenance():
@@ -372,8 +446,13 @@ def test_hindsight_memory_scopes_recall_and_queues_turn(monkeypatch):
 
     monkeypatch.setattr(memory_module, "urlopen", fake_urlopen)
     adapter = memory_module.HindsightMemory()
-    recalled = adapter.recall("user-123", "What am I evaluating?")
-    retained = adapter.retain_turn("user-123", "What am I evaluating?", "You are evaluating DOPO.", 2)
+    recalled = adapter.recall("user-123", "What am I evaluating?\nHINDSIGHT_API_KEY=hsk_private-test-secret-value")
+    retained = adapter.retain_turn(
+        "user-123",
+        "What am I evaluating?\nHINDSIGHT_API_KEY=hsk_private-test-secret-value",
+        "You are evaluating DOPO. Bearer token-should-not-be-stored",
+        2,
+    )
 
     assert recalled["status"] == "ok"
     assert recalled["items"][0]["text"].startswith("The user")
@@ -381,8 +460,11 @@ def test_hindsight_memory_scopes_recall_and_queues_turn(monkeypatch):
     assert calls[0]["auth"] == "Bearer hsk-test"
     assert "tags" not in calls[1]["body"]
     assert "tags_match" not in calls[1]["body"]
+    assert "hsk_private-test-secret-value" not in calls[1]["body"]["query"]
     assert calls[3]["body"]["items"][0]["document_id"].startswith("assistant-turn-")
     assert calls[3]["body"]["items"][0]["timestamp"].endswith("+00:00")
+    assert "hsk_private-test-secret-value" not in calls[3]["body"]["items"][0]["content"]
+    assert "token-should-not-be-stored" not in calls[3]["body"]["items"][0]["content"]
     assert calls[3]["body"]["async"] is False
 
 
@@ -465,6 +547,118 @@ def test_live_assistant_does_not_replace_ambiguous_query_with_seeded_demo(monkey
     body = response.json()
     assert body["answer"] == "Please include the chemical or topic."
     assert body["assistant_status"] == "Needs a specific subject"
+
+
+def test_assistant_answers_short_greetings_as_conversation_without_retrieval(monkeypatch):
+    import backend.app.main as main_module
+
+    def unexpected_call(*_args, **_kwargs):
+        raise AssertionError("A simple greeting should not call retrieval or an AI provider")
+
+    monkeypatch.setattr(main_module, "live_research", unexpected_call)
+    monkeypatch.setattr(main_module, "synthesize", unexpected_call)
+
+    response = client.post("/api/assistant", json={"question": "hi", "live": True})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["assistant_mode"] == "conversation"
+    assert body["assistant_status"] == "Conversation"
+    assert body["citations"] == []
+    assert body["history_saved"] is True
+    assert body["answer"].startswith("Hi!")
+
+
+def test_assistant_capability_question_has_no_unrelated_research_sources(monkeypatch):
+    import backend.app.main as main_module
+
+    def unexpected_call(*_args, **_kwargs):
+        raise AssertionError("A conversational capability question should not search research providers")
+
+    monkeypatch.setattr(main_module, "live_research", unexpected_call)
+    monkeypatch.setattr(main_module, "synthesize", unexpected_call)
+
+    response = client.post("/api/assistant", json={
+        "question": "Are you capable of answering my questions?",
+        "live": True,
+    })
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["assistant_mode"] == "conversation"
+    assert "general questions" in body["answer"]
+    assert body["citations"] == []
+    assert body["results"] == []
+
+
+def test_general_question_uses_ai_without_running_research_search(monkeypatch):
+    import backend.app.main as main_module
+
+    def unexpected_search(*_args, **_kwargs):
+        raise AssertionError("A general question should not trigger research-source searches")
+
+    def answer_without_sources(question, evidence):
+        assert evidence["results"] == []
+        assert evidence["citations"] == []
+        return "The sky looks blue because air molecules scatter shorter blue wavelengths more strongly.", None, "groq"
+
+    monkeypatch.setattr(main_module, "live_research", unexpected_search)
+    monkeypatch.setattr(main_module, "synthesize", answer_without_sources)
+
+    response = client.post("/api/assistant", json={
+        "question": "Can you explain why the sky is blue?",
+        "live": True,
+    })
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["assistant_mode"] == "llm_synthesis"
+    assert body["citations"] == []
+    assert body["results"] == []
+    assert "scatter" in body["answer"]
+
+
+def test_research_sources_must_match_the_actual_chemistry_topic():
+    import backend.app.llm as llm
+
+    question = "How does pH affect chemical stability?"
+    evidence = {
+        "results": [
+            {
+                "type": "live_paper",
+                "name": "pH stability of vitamin C during storage",
+                "abstract": "The study measures degradation as a function of pH.",
+                "source_url": "https://example.test/relevant",
+                "source": {"id": "relevant", "title": "pH stability of vitamin C during storage"},
+            },
+            {
+                "type": "live_paper",
+                "name": "Answering My Own Questions: Conclusions from the Case Study",
+                "abstract": "An unrelated humanities case study.",
+                "source_url": "https://example.test/unrelated",
+                "source": {"id": "unrelated", "title": "Answering My Own Questions"},
+            },
+        ],
+        "citations": [
+            {"id": "relevant", "label": "Relevant chemistry paper", "url": "https://example.test/relevant"},
+            {"id": "unrelated", "label": "Unrelated paper", "url": "https://example.test/unrelated"},
+        ],
+    }
+
+    filtered = llm.relevant_evidence(question, evidence)
+
+    assert [item["source_url"] for item in filtered["results"]] == ["https://example.test/relevant"]
+    assert [item["url"] for item in filtered["citations"]] == ["https://example.test/relevant"]
+
+
+def test_assistant_prompt_uses_natural_style_for_general_questions():
+    import backend.app.llm as llm
+
+    instructions, prompt = llm._prompt_parts("What makes a good morning routine?", {"results": []})
+
+    assert "respond naturally without headings, citations, or a forced chemistry framing" in instructions
+    assert "Do not force 'Direct answer', 'Key facts', or 'Research findings' headings" in instructions
+    assert "What makes a good morning routine?" in prompt
 
 
 def test_live_assistant_answers_general_questions_without_unrelated_citations(monkeypatch):

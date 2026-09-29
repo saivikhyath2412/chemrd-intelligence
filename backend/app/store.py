@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import hashlib
 import os
+import re
 import secrets
 import sqlite3
 import uuid
@@ -12,9 +13,24 @@ from pathlib import Path
 from typing import Any
 
 from .chemistry import structure_svg
+from .memory_privacy import redact_sensitive_text
 
 
 ORIGINS = {"measured", "literature_extracted", "calculated", "model_predicted", "ai_estimated"}
+_HISTORY_TERMS = re.compile(r"[a-z0-9][a-z0-9+.-]*", re.IGNORECASE)
+_HISTORY_STOPWORDS = {
+    "a", "about", "am", "an", "and", "are", "as", "at", "be", "can", "did", "do",
+    "earlier", "explain", "for", "from", "give", "how", "i", "in", "is", "it", "me",
+    "my", "of", "on", "or", "please", "should", "tell", "that", "the", "this", "to",
+    "was", "what", "when", "where", "which", "who", "why", "with", "you", "your",
+}
+_HISTORY_REFERENCE = re.compile(
+    r"\b(?:earlier|previous(?:ly)?|prior|last\s+(?:time|week|month|year)|remember|recall|"
+    r"what\s+did\s+i|what\s+was\s+i|we\s+(?:discussed|decided|found|tested|saw)|"
+    r"my\s+(?:research|project|sample|experiment)|that\s+(?:reaction|sample|result|compound)|"
+    r"it|that|those|these)\b",
+    re.IGNORECASE,
+)
 
 
 def utc_now() -> str:
@@ -396,8 +412,8 @@ class Store:
                 (
                     history_id,
                     user_id,
-                    question.strip(),
-                    answer,
+                    redact_sensitive_text(question.strip()),
+                    redact_sensitive_text(answer),
                     json.dumps(citations or []),
                     assistant_status or "",
                     assistant_provider,
@@ -416,6 +432,62 @@ class Store:
         for row in rows:
             row["citations"] = json.loads(row["citations"] or "[]")
         return rows
+
+    def assistant_memory_context(self, user_id: str, query: str, limit: int = 4) -> list[dict[str, Any]]:
+        """Find a few relevant, private prior turns for follow-up questions."""
+        if not user_id or not query.strip() or limit <= 0:
+            return []
+        rows = self._rows(
+            "SELECT id, question, answer, created_at FROM assistant_history "
+            "WHERE user_id = ? ORDER BY created_at DESC",
+            (user_id,),
+        )
+        if not rows:
+            return []
+
+        query_terms = {
+            token.casefold()
+            for token in _HISTORY_TERMS.findall(query)
+            if len(token) >= 2 and token.casefold() not in _HISTORY_STOPWORDS
+        }
+        if _HISTORY_REFERENCE.search(query):
+            selected = rows[:limit]
+        elif query_terms:
+            ranked = []
+            for index, row in enumerate(rows):
+                question_terms = {
+                    token.casefold()
+                    for token in _HISTORY_TERMS.findall(row["question"] or "")
+                    if len(token) >= 2 and token.casefold() not in _HISTORY_STOPWORDS
+                }
+                answer_terms = {
+                    token.casefold()
+                    for token in _HISTORY_TERMS.findall(row["answer"] or "")
+                    if len(token) >= 2 and token.casefold() not in _HISTORY_STOPWORDS
+                }
+                score = 2 * len(query_terms & question_terms) + len(query_terms & answer_terms)
+                if score:
+                    ranked.append((score, -index, row))
+            selected = [item[2] for item in sorted(ranked, reverse=True)[:limit]]
+        else:
+            selected = []
+
+        # Put retrieved turns in chronological order so the model can see how
+        # a hypothesis, result, or decision changed over time.
+        selected.sort(key=lambda row: row["created_at"])
+        context = []
+        for row in selected:
+            question = redact_sensitive_text(row["question"] or "")[:1200]
+            answer = redact_sensitive_text(row["answer"] or "")[:1800]
+            timestamp = row["created_at"] or ""
+            context.append({
+                "id": f"local-history-{row['id']}",
+                "type": "experience",
+                "timestamp": timestamp,
+                "context": "Private, user-scoped saved assistant history; continuity only, not verified scientific evidence.",
+                "text": f"Conversation on {timestamp}: User asked: {question}\nAssistant answered: {answer}",
+            })
+        return context
 
     def clear_assistant_history(self, user_id: str) -> None:
         with closing(self.connect()) as conn:

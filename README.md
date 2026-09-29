@@ -2,6 +2,8 @@
 
 ChemR&D is a runnable local MVP for chemistry and materials R&D teams. It combines a provenance-aware FastAPI backend with a polished single-page frontend. New workspaces start clean; optional demo data can be enabled explicitly for demonstrations.
 
+See [CHANGELOG.md](CHANGELOG.md) for release history, [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the code map and checks, and [docs/HINDSIGHT_MEMORY.md](docs/HINDSIGHT_MEMORY.md) for the requested memory/data-flow explanation.
+
 ## What is included
 
 - Universal search across chemicals, experiments, reactions, papers, patents, and formulations.
@@ -35,11 +37,13 @@ Open http://127.0.0.1:8000. Interactive API docs are at http://127.0.0.1:8000/do
 
 The assistant and Universal Search can query live public sources. Enable “Search documented public APIs live” in Universal Search or “Search live public sources” in the assistant. The API equivalents are `GET /api/research/live?q=...`, `GET /api/search?q=...&live=true`, and `POST /api/assistant` with `{ "question": "...", "live": true }`.
 
-On first launch, register an account in the login screen. The account and session records are stored in the configured database; the password itself is never stored. The browser session is held in an HttpOnly cookie. `CHEMRD_SESSION_DAYS` controls session lifetime and defaults to 30 days. The desktop app keeps its SQLite database under `%LOCALAPPDATA%\\ChemRD`.
+On first launch, register an account in the login screen. The account and session records are stored in the configured database; the password itself is never stored. Session tokens are stored hashed in the database and issued in an HttpOnly cookie; the desktop SPA also keeps the returned bearer token in `sessionStorage` for API requests. `CHEMRD_SESSION_DAYS` controls session lifetime and defaults to 30 days. The desktop app keeps its SQLite database under `%LOCALAPPDATA%\\ChemRD`.
 
 ### Optional Hindsight memory
 
-The Research Assistant can use Hindsight for private conversation continuity. It recalls user-scoped memories before AI synthesis and queues the completed question/answer for retention afterward. Hindsight memory is deliberately kept separate from live research evidence and is never emitted as a citation. Hindsight is disabled by default; enable it in `.env` with `HINDSIGHT_ENABLED=true`. For Hindsight Cloud, set `HINDSIGHT_API_URL=https://api.hindsight.vectorize.io` and `HINDSIGHT_API_KEY=hsk_...`. A self-hosted Hindsight server can use its local URL instead, such as `http://localhost:8888`; the API key may be left empty when the server does not require authentication. The integration uses Hindsight’s documented `retain` and `recall` endpoints and continues normally if Hindsight is offline.
+The Research Assistant can use Hindsight for private conversation continuity. Hindsight is optional and disabled by default. The full data flow, account and privacy controls, failure behavior, configuration, and current limitations are documented in [docs/HINDSIGHT_MEMORY.md](docs/HINDSIGHT_MEMORY.md). In short, relevant memories are recalled before synthesis and completed research turns are retained afterward; memory is kept separate from live evidence and is never cited as a scientific source. If Hindsight is unavailable, the assistant continues and can use the account’s local question history instead.
+
+For Hindsight Cloud, set `HINDSIGHT_ENABLED=true`, `HINDSIGHT_API_URL=https://api.hindsight.vectorize.io`, and your own `HINDSIGHT_API_KEY` in `.env`. A self-hosted Hindsight server can use its local URL, such as `http://localhost:8888`; leave the key empty only if that server does not require authentication. Never commit a real `.env` file or share API keys.
 
 Live chemical identity cards and assistant identity answers include a **Save to chemical library** action. The folder picker lets a user save the canonical chemical record or any related research item into a chosen folder. Folder contents are separate from the canonical chemical table, so a folder can organize mixed research material without changing chemical identity or provenance.
 
@@ -114,7 +118,7 @@ For the source version, keep `.env` in the repository root beside `pyproject.tom
 pytest -q
 ```
 
-The tests cover health, search, provenance/value-origin separation, analysis overlays, graph data, and ingestion connector discovery.
+The suite covers authentication and account scoping, settings and assistant-history privacy, Hindsight request behavior, AI provider fallback and citation relevance, chemical identity and structure handling, experiments and simulation history, graph/search APIs, and provenance separation. JavaScript syntax can also be checked with `node --check frontend/assets/app.js`; the Windows executable is built from `chemrd-desktop.spec` as described above.
 
 ## Project layout
 
@@ -123,7 +127,10 @@ backend/app/       FastAPI app, store, seed data, chemistry helpers, connectors
 frontend/          static SPA assets served by FastAPI
 migrations/        PostgreSQL/pgvector reference schema
 tests/             API and domain tests
+docs/              architecture and privacy/data-flow notes
 ```
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for component boundaries, local runtime behavior, and contributor checks.
 
 ## Data and provenance model
 
@@ -138,7 +145,7 @@ Live retrieval uses documented public APIs instead of copying the open web. It r
 ## Production hardening roadmap
 
 1. Move repository methods to SQLAlchemy 2 + PostgreSQL/pgvector and add migrations through Alembic.
-2. Add authentication, workspace-level authorization, object storage, audit logs, and background ingestion jobs.
+2. Add multi-workspace membership and role-based authorization, production audit logs, object storage, and durable background ingestion jobs.
 3. Add licensed registry, CAS, patent, and vendor connectors with rate limits and source-specific attribution.
 4. Add RDKit standardization, descriptors, substructure search, and embedding generation.
-5. Replace the demo assistant with a retrieval pipeline that filters by source license and cites retrieved records.
+5. Replace remaining demo-only workspace responses with verified, provenance-backed records and citations.

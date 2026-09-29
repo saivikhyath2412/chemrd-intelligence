@@ -13,7 +13,13 @@ dist/
 build/
 dist-*/
 build-*/
+# One-file builds and dated staging copies belong in GitHub Releases, not source history.
+release/ChemRD-Intelligence.exe
+release/ChemRD-Intelligence-*.exe
+release/chat-*/
 release-package/
 *.zip
 .smoke-current/
 node_modules/
+# One-off local provider probe; not part of the supported app or test suite.
+scripts/inspect_public_structure.py

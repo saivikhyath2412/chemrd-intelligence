@@ -20,6 +20,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
+from .memory_privacy import redact_sensitive_text
+
 try:
     from dotenv import load_dotenv
 except ImportError:  # pragma: no cover - bundled app includes python-dotenv
@@ -82,8 +84,20 @@ class HindsightMemory:
             f"/v1/default/banks/{bank}",
             {
                 "name": self._bank_id(user_id),
-                "observations_mission": "Remember stable preferences and project context for this ChemR&D account.",
-                "retain_mission": "Remember useful ChemR&D assistant conversation context; do not treat it as scientific evidence.",
+                "observations_mission": (
+                    "For this user's private ChemR&D account, retain durable research projects, goals, "
+                    "hypotheses, compounds and identifiers, experiment conditions and results, decisions "
+                    "and reasoning, failures, preferences, deadlines, collaborators, and open questions. "
+                    "Do not retain passwords, API keys, access tokens, credentials, or personal details "
+                    "unrelated to their research. Keep conflicting facts distinct until the user clarifies."
+                ),
+                "retain_mission": (
+                    "Extract useful, durable ChemR&D research context from the conversation for this "
+                    "user only. Prefer project context, compounds, identifiers, conditions, results, "
+                    "decisions, preferences, failed attempts, and open loops. Never retain credentials "
+                    "or unrelated personal information. These memories are continuity context, not "
+                    "scientific evidence."
+                ),
             },
         )
 
@@ -93,7 +107,7 @@ class HindsightMemory:
             return empty
         bank = quote(self._bank_id(user_id), safe="")
         payload = {
-            "query": query[:2000],
+            "query": redact_sensitive_text(query)[:2000],
             "budget": _value("HINDSIGHT_RECALL_BUDGET", "low"),
             "max_tokens": max(200, int(_value("HINDSIGHT_RECALL_MAX_TOKENS", "1200"))),
             "types": ["world", "experience", "observation"],
@@ -106,12 +120,16 @@ class HindsightMemory:
             for item in response.get("results", []) or []:
                 if not isinstance(item, dict) or not item.get("text"):
                     continue
+                metadata = item.get("metadata")
+                if not isinstance(metadata, dict):
+                    metadata = {}
                 items.append({
                     "id": item.get("id"),
                     "text": str(item.get("text"))[:3000],
                     "type": item.get("type", "experience"),
                     "context": item.get("context"),
-                    "metadata": item.get("metadata") or {},
+                    "metadata": metadata,
+                    "timestamp": item.get("timestamp") or item.get("created_at") or metadata.get("timestamp"),
                 })
             return {"items": items[:8], "status": "ok" if items else "ok_empty"}
         except (HTTPError, URLError, TimeoutError, OSError, ValueError):
@@ -125,7 +143,10 @@ class HindsightMemory:
         document_id = f"assistant-turn-{uuid.uuid4().hex}"
         payload = {
             "items": [{
-                "content": f"User: {question.strip()}\nAssistant: {answer.strip()[:12000]}",
+                "content": (
+                    f"User: {redact_sensitive_text(question.strip())}\n"
+                    f"Assistant: {redact_sensitive_text(answer.strip())[:12000]}"
+                ),
                 "context": "ChemR&D research assistant conversation",
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "document_id": document_id,
