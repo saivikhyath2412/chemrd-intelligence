@@ -39,6 +39,14 @@ CREATE TABLE IF NOT EXISTS experiments (
  id TEXT PRIMARY KEY, name TEXT NOT NULL, status TEXT NOT NULL, objective TEXT, chemical_ids TEXT NOT NULL DEFAULT '[]',
  owner TEXT, started_at TEXT, updated_at TEXT, source_id TEXT, FOREIGN KEY(source_id) REFERENCES sources(id)
 );
+CREATE TABLE IF NOT EXISTS simulations (
+ id TEXT PRIMARY KEY, user_id TEXT NOT NULL, experiment_id TEXT,
+ name TEXT NOT NULL, objective TEXT NOT NULL DEFAULT '', experiment_type TEXT NOT NULL DEFAULT 'Custom',
+ input_data TEXT NOT NULL DEFAULT '{}', result_data TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL DEFAULT 'completed',
+ created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+ FOREIGN KEY(user_id) REFERENCES users(id), FOREIGN KEY(experiment_id) REFERENCES experiments(id)
+);
+CREATE INDEX IF NOT EXISTS simulations_user_idx ON simulations(user_id, updated_at DESC);
 CREATE TABLE IF NOT EXISTS formulations (
  id TEXT PRIMARY KEY, name TEXT NOT NULL, recipe TEXT NOT NULL, purpose TEXT, status TEXT NOT NULL, source_id TEXT,
  FOREIGN KEY(source_id) REFERENCES sources(id)
@@ -236,6 +244,10 @@ class Store:
     def initialize(self) -> None:
         with closing(self.connect()) as conn:
             conn.executescript(SCHEMA)
+            try:
+                conn.execute("ALTER TABLE experiments ADD COLUMN experiment_type TEXT DEFAULT 'Custom'")
+            except sqlite3.OperationalError:
+                pass
             timestamp = utc_now()
             conn.executemany(
                 "INSERT OR IGNORE INTO library_folders (id, name, description, created_at, updated_at) VALUES (?,?,?,?,?)",
@@ -323,7 +335,7 @@ class Store:
                 ("exp-dsc-011", "Phenolic cure window", "completed", "Locate cure exotherm and post-cure Tg for three resin lots.", '["chem-phenol","chem-resole"]', "M. Iyer", "2026-08-04", "2026-08-20", "src-journal-phenolic"),
                 ("exp-ftir-007", "Boron-resole compatibility", "planned", "Confirm borate coordination signatures by FTIR.", '["chem-resole","chem-boric"]', "S. Nair", "2026-10-02", "2026-10-02", "src-lab-thermal"),
             ]
-            conn.executemany("INSERT INTO experiments VALUES (?,?,?,?,?,?,?,?,?)", experiments)
+            conn.executemany("INSERT INTO experiments (id, name, status, objective, chemical_ids, owner, started_at, updated_at, source_id) VALUES (?,?,?,?,?,?,?,?,?)", experiments)
             formulations = [
                 ("form-fp-01", "FR-Resole Pilot 01", '{"chem-resole":72,"chem-dopo":18,"chem-boric":10}', "Halogen-free flame-retardant resin", "screening", "src-lab-thermal"),
                 ("form-resole-base", "Resole Base R-01", '{"chem-phenol":82,"chem-formaldehyde":18}', "Reference phenolic resin", "reference", "src-journal-phenolic"),
@@ -357,6 +369,7 @@ class Store:
         rows = self._rows("SELECT * FROM chemicals ORDER BY name")
         for row in rows:
             row["synonyms"] = json.loads(row["synonyms"] or "[]")
+            row['structure_svg'] = structure_svg(row.get('smiles'))
         return rows
 
     def chemical(self, chemical_id: str) -> dict | None:
@@ -513,6 +526,97 @@ class Store:
         for row in rows:
             row["chemical_ids"] = json.loads(row["chemical_ids"] or "[]")
         return rows
+
+    def create_experiment(self, payload: dict[str, Any]) -> dict:
+        exp_id = "exp-" + uuid.uuid4().hex[:10]
+        timestamp = utc_now()
+        started_at = payload.get("date") or timestamp[:10]
+        chemical_ids = payload.get("chemical_ids") or []
+        with closing(self.connect()) as conn:
+            conn.execute(
+                """INSERT INTO experiments (id, name, status, objective, chemical_ids, owner, started_at, updated_at, source_id, experiment_type)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    exp_id,
+                    payload["name"].strip(),
+                    payload.get("status", "planned"),
+                    payload.get("objective", "").strip(),
+                    json.dumps(chemical_ids),
+                    payload.get("owner", "").strip() or "Lead Researcher",
+                    started_at,
+                    timestamp,
+                    payload.get("source_id"),
+                    payload.get("experiment_type", "Custom"),
+                ),
+            )
+            if payload.get("simulation_id"):
+                conn.execute(
+                    "UPDATE simulations SET experiment_id = ?, updated_at = ? WHERE id = ? AND user_id = ?",
+                    (exp_id, timestamp, payload["simulation_id"], payload.get("user_id", "")),
+                )
+            conn.commit()
+        rows = self._rows("SELECT * FROM experiments WHERE id = ?", (exp_id,))
+        if rows:
+            row = rows[0]
+            row["chemical_ids"] = json.loads(row["chemical_ids"] or "[]")
+            return row
+        return {"id": exp_id, **payload}
+
+    def create_simulation(self, user_id: str, payload: dict[str, Any]) -> dict:
+        experiment = payload.get("experiment") or {}
+        results = payload.get("simulation_results") or {}
+        simulation_id = "sim-" + uuid.uuid4().hex[:12]
+        timestamp = utc_now()
+        name = str(experiment.get("name") or "Untitled simulation").strip()
+        objective = str(experiment.get("objective") or "").strip()
+        experiment_type = str(experiment.get("experiment_type") or "Custom")
+        with closing(self.connect()) as conn:
+            conn.execute(
+                """INSERT INTO simulations
+                   (id, user_id, name, objective, experiment_type, input_data, result_data, status, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    simulation_id,
+                    user_id,
+                    name,
+                    objective,
+                    experiment_type,
+                    json.dumps(experiment),
+                    json.dumps(results),
+                    "completed",
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            conn.commit()
+        return self.simulation(user_id, simulation_id) or {"id": simulation_id, "name": name}
+
+    def simulations(self, user_id: str) -> list[dict[str, Any]]:
+        rows = self._rows(
+            """SELECT id, experiment_id, name, objective, experiment_type, status, created_at, updated_at,
+                      result_data
+               FROM simulations WHERE user_id = ? ORDER BY updated_at DESC""",
+            (user_id,),
+        )
+        for row in rows:
+            result = json.loads(row.pop("result_data") or "{}")
+            row["feasibility_score"] = result.get("feasibility_score")
+            row["feasibility_label"] = result.get("feasibility_label")
+            row["reaction_type"] = result.get("reaction_type")
+            row["main_product"] = (result.get("main_product_details") or {}).get("name")
+        return rows
+
+    def simulation(self, user_id: str, simulation_id: str) -> dict[str, Any] | None:
+        rows = self._rows(
+            "SELECT * FROM simulations WHERE id = ? AND user_id = ?",
+            (simulation_id, user_id),
+        )
+        if not rows:
+            return None
+        row = rows[0]
+        row["experiment"] = json.loads(row.pop("input_data") or "{}")
+        row["simulation_results"] = json.loads(row.pop("result_data") or "{}")
+        return row
 
     def formulations(self) -> list[dict]:
         rows = self._rows("SELECT * FROM formulations ORDER BY name")

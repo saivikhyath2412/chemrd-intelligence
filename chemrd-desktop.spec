@@ -1,5 +1,6 @@
 # PyInstaller build recipe for the double-clickable local ChemR&D app.
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_submodules, collect_all
+rdkit_datas, rdkit_binaries, rdkit_imports = collect_all('rdkit')
 
 hiddenimports = (
     collect_submodules("uvicorn")
@@ -7,13 +8,14 @@ hiddenimports = (
     + collect_submodules("starlette")
     + collect_submodules("webview")
     + collect_submodules("openai")
+    + rdkit_imports
 )
 
 a = Analysis(
     ["desktop_launcher.py"],
     pathex=["."],
-    binaries=[],
-    datas=[("frontend", "frontend")],
+    binaries=rdkit_binaries,
+    datas=[("frontend", "frontend"), *rdkit_datas],
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},

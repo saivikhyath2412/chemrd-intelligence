@@ -38,7 +38,12 @@ def test_auth_register_login_me_logout():
     )
     assert registered.status_code == 201
     assert registered.json()["user"]["username"] == username
+    assert registered.json()["session_token"]
     assert auth_client.get("/api/auth/me").status_code == 200
+
+    bearer_client = TestClient(app)
+    bearer = registered.json()["session_token"]
+    assert bearer_client.get("/api/dashboard", headers={"Authorization": f"Bearer {bearer}"}).status_code == 200
 
     assert auth_client.post("/api/auth/logout").status_code == 200
     assert auth_client.get("/api/auth/me").status_code == 401
@@ -91,7 +96,7 @@ def test_search_and_chemical_provenance():
     assert all("source_title" in prop for prop in record["properties"])
 
 
-def test_structure_proxy_uses_cactus_and_keeps_3d_origin_explicit(monkeypatch):
+def test_structure_proxy_generates_real_3d_coordinates_locally(monkeypatch):
     class FakeResponse:
         def __enter__(self):
             return self
@@ -112,9 +117,13 @@ def test_structure_proxy_uses_cactus_and_keeps_3d_origin_explicit(monkeypatch):
     response = main_module._structure_asset("3d", fallback_smiles="CC(C)O", fallback_name="isopropanol")
 
     assert response.status_code == 200
-    assert response.headers["x-chemrd-structure-origin"] == "model_predicted"
-    assert "Cactus" in response.headers["x-chemrd-structure-source"]
-    assert seen == ["https://cactus.nci.nih.gov/chemical/structure/CC%28C%29O/file?format=sdf&get3d=true"]
+    assert response.headers["x-chemrd-structure-origin"] == "calculated"
+    assert "RDKit" in response.headers["x-chemrd-structure-source"]
+    from rdkit import Chem
+    mol = Chem.MolFromMolBlock(response.body.decode(), removeHs=False)
+    assert mol.GetNumAtoms() == 12
+    assert mol.GetConformer().Is3D()
+    assert seen == []
 
 
 def test_analysis_graph_and_connector_preview():
@@ -162,6 +171,38 @@ def test_live_research_endpoint_keeps_provider_contract(monkeypatch):
     assert response.status_code == 200
     assert response.json()["results"][0]["type"] == "live_chemical"
     assert response.json()["citations"][0]["url"].startswith("https://")
+
+
+def test_chemical_identity_prefers_structured_chebi_record(monkeypatch):
+    import backend.app.live_research as research
+
+    def fake_json(url):
+        if "es_search" in url:
+            return {"results": [{"_source": {"id": "CHEBI:12345", "name": "capsaicin"}}]}, None
+        return {
+            "name": "capsaicin",
+            "definition": "A vanilloid compound.",
+            "chemical_data": {"formula": "C18H27NO3", "mass": 305.41},
+            "default_structure": {
+                "smiles": "COc1cc(CNC(=O)CCCC/C=C/C(C)C)ccc1O",
+                "standard_inchi": "InChI=1S/demo",
+                "standard_inchi_key": "DEMO-CAPSAICIN-KEY",
+            },
+            "names": {"SYNONYMS": [{"name": "capsaicin"}, {"name": "CAS 404-86-4"}]},
+        }, None
+
+    monkeypatch.setattr(research, "_fetch_json", fake_json)
+    monkeypatch.setattr(research, "_fetch_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("Cactus must not be queried when ChEBI has a structure")))
+    monkeypatch.setattr(research, "_rdkit_descriptors", lambda _smiles: {"formula": "C18H27NO3", "molecular_weight": 305.41, "exact_mass": 305.20})
+
+    record, error = research.chemical_identity_lookup("Capsaicin")
+
+    assert error is None
+    assert record["source"]["publisher"] == "EMBL-EBI ChEBI"
+    assert record["source_url"].startswith("https://www.ebi.ac.uk/chebi/searchId.do")
+    assert "cactus.nci.nih.gov" not in record["source_url"]
+    assert record["identifiers"]["chebi_id"] == "CHEBI:12345"
+    assert record["properties"]
 
 
 def test_live_assistant_uses_ai_synthesis_only_in_assistant_route(monkeypatch):
@@ -268,7 +309,7 @@ def test_chemical_name_parser_handles_greek_prefix_and_conversation():
     assert _is_generic_follow_up("Tell me about it")
 
 
-def test_chemical_identity_lookup_uses_cactus_and_rdkit_provenance(monkeypatch):
+def test_chemical_identity_lookup_uses_cactus_only_as_fallback(monkeypatch):
     import backend.app.live_research as live
 
     def fake_fetch_text(url, accept="text/plain"):
@@ -281,15 +322,17 @@ def test_chemical_identity_lookup_uses_cactus_and_rdkit_provenance(monkeypatch):
         return "ethanol\nethyl alcohol\n64-17-5\n", None
 
     monkeypatch.setattr(live, "_fetch_text", fake_fetch_text)
+    monkeypatch.setattr(live, "_fetch_json", lambda *_: (None, 'offline'))
     monkeypatch.setattr(live, "_rdkit_descriptors", lambda smiles: {"formula": "C2H6O", "molecular_weight": 46.07, "tpsa": 20.23})
     record, error = live.chemical_identity_lookup("ethanol")
     assert error is None
     assert record["id"].startswith("chemical-")
     assert record["smiles"] == "CCO"
     assert record["cas_numbers"] == ["64-17-5"]
-    assert record["source"]["publisher"] == "NCI/CADD Cactus"
+    assert record["source"]["publisher"] == "NCI/CADD Cactus (fallback)"
     assert record["source"]["metadata"]["descriptor_origin"] == "calculated locally with RDKit"
-    assert "PubChem" not in str(record)
+    assert record["source"]["publisher"] == "NCI/CADD Cactus (fallback)"
+    assert record["source_url"].startswith("https://cactus.nci.nih.gov/")
 
 
 def test_chemical_identity_lookup_can_fall_back_to_chebi(monkeypatch):
@@ -315,7 +358,7 @@ def test_chemical_identity_lookup_can_fall_back_to_chebi(monkeypatch):
     monkeypatch.setattr(live, "_rdkit_descriptors", lambda smiles: {"formula": "C9H8O4", "molecular_weight": 180.16})
     record, error = live.chemical_identity_lookup("aspirin")
     assert error is None
-    assert record["source"]["publisher"] == "ChEBI"
+    assert record["source"]["publisher"] == "EMBL-EBI ChEBI"
     assert record["source"]["metadata"]["chebi_id"] == "CHEBI:15365"
     assert record["source_url"] == "https://www.ebi.ac.uk/chebi/searchId.do?chebiId=CHEBI:15365"
     assert "/backend/api/" not in record["source_url"]
@@ -496,10 +539,11 @@ def test_structure_asset_proxy_keeps_public_assets_same_origin(monkeypatch):
     sdf = client.get(f"/api/chemicals/{chemical_id}/conformer-3d")
     public_image = client.get("/api/live-structure/2d", params={"smiles": "CCO", "name": "ethanol"})
     assert image.status_code == 200
-    assert image.headers["content-type"].startswith("image/png")
+    assert image.headers["content-type"].startswith("image/svg+xml")
+    assert '<path' in image.text
     assert sdf.status_code == 200
     assert sdf.headers["content-type"].startswith("chemical/x-mdl-sdfile")
     assert public_image.status_code == 200
-    assert len(seen) == 3
-    assert "/chemical/structure/CCO/image" in seen[0][0]
-    assert "/chemical/structure/CCO/file?format=sdf&get3d=true" in seen[1][0]
+    assert seen == []
+    from rdkit import Chem
+    assert Chem.MolFromMolBlock(sdf.text).GetConformer().Is3D()

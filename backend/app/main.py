@@ -30,7 +30,8 @@ from .chemistry import structure_svg
 from .live_research import live_research
 from .llm import relevant_evidence, synthesize
 from .hindsight_memory import hindsight_memory
-from .models import AuthLoginRequest, AuthRegisterRequest, AssistantRequest, IngestPreviewRequest, LibraryFolderCreate, LibraryItemCreate, SaveLiveChemicalRequest
+from .models import AuthLoginRequest, AuthRegisterRequest, AssistantRequest, ExperimentCreate, IngestPreviewRequest, LibraryFolderCreate, LibraryItemCreate, SaveLiveChemicalRequest, SimulationRequest, SimulationSaveRequest
+from .simulation import simulate_experiment
 from .store import Store
 
 
@@ -91,7 +92,7 @@ def register(request: AuthRegisterRequest):
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     token, max_age = store.create_session(user["id"])
-    response = JSONResponse({"user": user}, status_code=201)
+    response = JSONResponse({"user": user, "session_token": token}, status_code=201)
     _set_session_cookie(response, token, max_age)
     return response
 
@@ -102,17 +103,18 @@ def login(request: AuthLoginRequest):
     if not user:
         raise HTTPException(401, "Invalid username or password")
     token, max_age = store.create_session(user["id"])
-    response = JSONResponse({"user": user})
+    response = JSONResponse({"user": user, "session_token": token})
     _set_session_cookie(response, token, max_age)
     return response
 
 
 @app.get("/api/auth/me")
 def auth_me(request: Request):
-    user = store.user_for_session(_session_token(request))
+    token = _session_token(request)
+    user = store.user_for_session(token)
     if not user:
         raise HTTPException(401, "Login required")
-    return {"user": user}
+    return {"user": user, "session_token": token}
 
 
 @app.post("/api/auth/logout")
@@ -152,110 +154,47 @@ def chemical(chemical_id: str):
     item = store.chemical(chemical_id)
     if not item:
         raise HTTPException(404, "Chemical not found")
+    from .chemistry import valid_smiles
+    if not valid_smiles(item.get('smiles')):
+        from .live_research import chemical_identity_lookup
+        # Earlier builds saved wildcard ontology hits. Recover using the
+        # original user-supplied synonym rather than the incorrect class name.
+        candidates = [item.get('cas_number'), *item.get('synonyms', []), item.get('name')]
+        for candidate in [c for c in candidates if c][:4]:
+            fixed, _ = chemical_identity_lookup(candidate)
+            if fixed:
+                item.update({k: fixed[k] for k in ('name', 'formula', 'molecular_weight', 'smiles', 'inchi', 'inchikey', 'description', 'synonyms') if fixed.get(k) is not None})
+                item['structure_svg'] = structure_svg(fixed['smiles'])
+                item['properties'] = [{**p, 'value_text': str(p['value']), 'source_title': fixed['source']['title'], 'method': 'RDKit descriptor' if p['origin'] == 'calculated' else 'Provider identity field'} for p in fixed.get('properties', [])]
+                break
+    item['structure_2d_url'] = f'/api/chemicals/{chemical_id}/structure-2d'
+    item['conformer_3d_url'] = f'/api/chemicals/{chemical_id}/conformer-3d'
     return item
 
 
 def _chemical_structure_asset(chemical_id: str, asset: str) -> Response:
-    item = store.chemical(chemical_id)
+    item = chemical(chemical_id)
     if not item:
         raise HTTPException(404, "Chemical not found")
     return _structure_asset(asset, fallback_smiles=item.get("smiles"), fallback_name=item.get("name"))
 
 
 def _local_conformer_sdf(smiles: str | None) -> bytes | None:
-    """Generate a real 3D SDF when RDKit is installed in the deployment."""
-    if not smiles:
-        return None
+    from .chemistry import conformer_sdf
+    return conformer_sdf(smiles)
+
+
+def _structure_asset(asset: str, fallback_smiles: str | None = None, fallback_name: str | None = None) -> Response:
+    from .structure_service import structure_asset
     try:
-        from rdkit import Chem
-        from rdkit.Chem import AllChem
-
-        mol = Chem.AddHs(Chem.MolFromSmiles(smiles))
-        if mol is None:
-            return None
-        params = AllChem.ETKDGv3()
-        params.randomSeed = 0xC0FFEE
-        params.useRandomCoords = True
-        if AllChem.EmbedMolecule(mol, params) < 0:
-            return None
-        try:
-            AllChem.MMFFOptimizeMolecule(mol, maxIters=200)
-        except Exception:
-            AllChem.UFFOptimizeMolecule(mol, maxIters=200)
-        return (Chem.MolToMolBlock(Chem.RemoveHs(mol)) + "\n$$$$\n").encode("utf-8")
-    except Exception:
-        return None
-
-
-def _structure_asset(
-    asset: str,
-    fallback_smiles: str | None = None,
-    fallback_name: str | None = None,
-) -> Response:
-    identifier = fallback_smiles or fallback_name
-    if not identifier:
-        raise HTTPException(404, "No SMILES or chemical name is available for this structure")
-    encoded_identifier = quote(identifier, safe="")
-    if asset == "2d":
-        candidates = [
-            (f"https://cactus.nci.nih.gov/chemical/structure/{encoded_identifier}/image", "image/png", "NCI/CADD Cactus 2-D depiction"),
-        ]
-    else:
-        candidates = [
-            (f"https://cactus.nci.nih.gov/chemical/structure/{encoded_identifier}/file?format=sdf&get3d=true", "chemical/x-mdl-sdfile", "NCI/CADD Cactus generated 3-D conformer"),
-        ]
-    last_error = None
-    for candidate in candidates:
-        url, media_type, source_label = candidate
-        try:
-            request = UrlRequest(url)
-            request.add_header("User-Agent", "ChemRD-Intelligence/0.2")
-            with urlopen(request, timeout=25) as response:
-                payload = response.read()
-            # Some public structure services return a MOL file without the
-            # SDF record terminator. Add it so every downstream SDF consumer,
-            # including 3Dmol.js, receives a complete single-record SDF.
-            if media_type == "chemical/x-mdl-sdfile" and b"M  END" in payload and b"$$$$" not in payload:
-                payload += b"\n$$$$\n"
-            return Response(
-                content=payload,
-                media_type=media_type,
-                headers={
-                    "Cache-Control": "public, max-age=86400",
-                    "X-ChemRD-Structure-Source": source_label,
-                    "X-ChemRD-Structure-Origin": "model_predicted" if asset == "3d" else "provider_retrieved",
-                },
-            )
-        except (OSError, URLError) as exc:
-            last_error = exc
-    if asset == "2d":
-        try:
-            local_svg = structure_svg(fallback_smiles).encode("utf-8") if fallback_smiles else None
-        except Exception:
-            local_svg = None
-        if local_svg:
-            return Response(
-                content=local_svg,
-                media_type="image/svg+xml",
-                headers={
-                    "Cache-Control": "private, max-age=3600",
-                    "X-ChemRD-Structure-Source": "Local RDKit 2-D depiction",
-                    "X-ChemRD-Structure-Origin": "calculated",
-                },
-            )
-    else:
-        local_sdf = _local_conformer_sdf(fallback_smiles)
-        if local_sdf:
-            return Response(
-                content=local_sdf,
-                media_type="chemical/x-mdl-sdfile",
-                headers={
-                    "Cache-Control": "private, max-age=3600",
-                    "X-ChemRD-Structure-Source": "Local RDKit ETKDG/MMFF conformer",
-                    "X-ChemRD-Structure-Origin": "calculated",
-                },
-            )
-    raise HTTPException(502, f"The external structure service is unavailable and no local fallback could be generated: {last_error}")
+        payload, media_type, source = structure_asset(asset, fallback_smiles, fallback_name)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return Response(content=payload, media_type=media_type, headers={
+        "Cache-Control": "private, max-age=86400",
+        "X-ChemRD-Structure-Source": source,
+        "X-ChemRD-Structure-Origin": "calculated",
+    })
 
 
 @app.get("/api/chemicals/{chemical_id}/structure-2d")
@@ -322,6 +261,42 @@ def sources():
 @app.get("/api/experiments")
 def experiments():
     return store.experiments()
+
+
+@app.post("/api/experiments")
+def create_experiment_endpoint(request: ExperimentCreate, http_request: Request):
+    try:
+        payload = request.model_dump()
+        payload["user_id"] = http_request.state.user["id"]
+        return store.create_experiment(payload)
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/experiments/simulate")
+def simulate_experiment_endpoint(request: SimulationRequest):
+    try:
+        return simulate_experiment(request)
+    except Exception as exc:
+        raise HTTPException(500, f"Simulation failed: {exc}") from exc
+
+
+@app.get("/api/simulations")
+def simulations(request: Request):
+    return store.simulations(request.state.user["id"])
+
+
+@app.get("/api/simulations/{simulation_id}")
+def simulation_detail(simulation_id: str, request: Request):
+    record = store.simulation(request.state.user["id"], simulation_id)
+    if not record:
+        raise HTTPException(404, "Simulation not found")
+    return record
+
+
+@app.post("/api/simulations", status_code=201)
+def save_simulation(request: SimulationSaveRequest, http_request: Request):
+    return store.create_simulation(http_request.state.user["id"], request.model_dump())
 
 
 @app.get("/api/formulations")

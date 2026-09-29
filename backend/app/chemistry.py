@@ -1,47 +1,75 @@
 from __future__ import annotations
 
-import html
-import re
+from functools import lru_cache
 
 
-def _fallback_atoms(smiles: str) -> list[str]:
-    # A deliberately small, dependency-free atom tokenizer used when RDKit is
-    # unavailable. It is a visual fallback, not a chemistry parser.
-    atoms = re.findall(r"Br|Cl|Si|[A-Z][a-z]?", smiles or "")
-    return atoms[:18] or ["?"]
-
-
-def structure_svg(smiles: str | None, width: int = 360, height: int = 220) -> str:
-    """Return a safe inline SVG; use RDKit when installed and a visual fallback otherwise."""
-    if not smiles:
-        return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 220"><text x="20" y="110" fill="#94a3b8">No structure available</text></svg>'
-    try:
-        from rdkit import Chem
-        from rdkit.Chem import Draw
-
+def molecule(smiles: str | None):
+    if not smiles or len(smiles) > 20000:
+        return None
+    from rdkit import Chem, rdBase
+    with rdBase.BlockLogs():
         mol = Chem.MolFromSmiles(smiles)
-        if mol:
-            drawer = Draw.MolDraw2DSVG(width, height)
-            drawer.DrawMolecule(mol)
-            drawer.FinishDrawing()
-            return drawer.GetDrawingText()
+    if mol is None or not mol.GetNumAtoms() or any(a.GetAtomicNum() == 0 for a in mol.GetAtoms()):
+        return None
+    return mol
+
+
+def valid_smiles(smiles: str | None) -> bool:
+    try:
+        return molecule(smiles) is not None
     except Exception:
-        pass
+        return False
 
-    atoms = _fallback_atoms(smiles)
-    center_x, center_y = width / 2, height / 2
-    radius = min(78, 22 + len(atoms) * 4)
-    points = []
-    for i, atom in enumerate(atoms):
-        angle = (i / max(1, len(atoms))) * 6.28318 - 1.57
-        x = center_x + radius * __import__("math").cos(angle)
-        y = center_y + radius * __import__("math").sin(angle)
-        points.append((x, y, atom))
-    lines = []
-    for i in range(len(points)):
-        x1, y1, _ = points[i]
-        x2, y2, _ = points[(i + 1) % len(points)]
-        lines.append(f'<line x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}" stroke="#64748b" stroke-width="2"/>')
-    labels = [f'<text x="{x:.1f}" y="{y + 4:.1f}" text-anchor="middle" font-size="13" font-weight="700" fill="#dbeafe">{html.escape(atom)}</text>' for x, y, atom in points]
-    return f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" role="img" aria-label="Molecular structure fallback"><rect width="100%" height="100%" rx="18" fill="#0f172a"/>{''.join(lines)}{''.join(labels)}<text x="18" y="202" fill="#94a3b8" font-size="11">SMILES: {html.escape(smiles)}</text></svg>'''
 
+@lru_cache(maxsize=512)
+def structure_svg(smiles: str | None, width: int = 600, height: int = 380) -> str:
+    """Render the actual molecular graph without invented fallback bonds."""
+    mol = molecule(smiles)
+    if mol is None:
+        return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 380"><rect width="600" height="380" fill="#f8fafc"/><text x="300" y="180" text-anchor="middle" fill="#334155">No concrete structure: provide a name, CAS number or SMILES</text></svg>'
+    from rdkit.Chem import rdDepictor
+    from rdkit.Chem.Draw import rdMolDraw2D
+    rdDepictor.Compute2DCoords(mol)
+    drawer = rdMolDraw2D.MolDraw2DSVG(width, height)
+    drawer.drawOptions().padding = 0.08
+    drawer.DrawMolecule(mol)
+    drawer.FinishDrawing()
+    return drawer.GetDrawingText()
+
+
+@lru_cache(maxsize=256)
+def conformer_sdf(smiles: str | None) -> bytes | None:
+    from rdkit import Chem
+    from rdkit.Chem import AllChem
+    mol = molecule(smiles)
+    if mol is None:
+        return None
+    mol = Chem.AddHs(mol)
+    for random_coords, seed in ((False, 0xC0FFEE), (True, 42), (True, 2718)):
+        params = AllChem.ETKDGv3()
+        params.randomSeed = seed
+        params.useRandomCoords = random_coords
+        params.maxIterations = 1000
+        params.timeout = 12
+        if AllChem.EmbedMolecule(mol, params) >= 0:
+            try:
+                if AllChem.MMFFHasAllMoleculeParams(mol):
+                    AllChem.MMFFOptimizeMolecule(mol, maxIters=500)
+                elif AllChem.UFFHasAllMoleculeParams(mol):
+                    AllChem.UFFOptimizeMolecule(mol, maxIters=500)
+            except Exception:
+                pass
+            # Disconnected ions/fragments are laid out separately, not on top
+            # of each other. This is a molecular model, not a crystal lattice.
+            fragments = Chem.GetMolFrags(mol)
+            if len(fragments) > 1:
+                conf = mol.GetConformer()
+                offset = 0.0
+                for fragment in fragments:
+                    points = [conf.GetAtomPosition(i) for i in fragment]
+                    left, right = min(p.x for p in points), max(p.x for p in points)
+                    for i, point in zip(fragment, points):
+                        conf.SetAtomPosition(i, (point.x - left + offset, point.y, point.z))
+                    offset += right - left + 3.0
+            return (Chem.MolToMolBlock(mol) + '\n$$$$\n').encode('utf-8')
+    return None
